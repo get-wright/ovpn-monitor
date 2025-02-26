@@ -10,7 +10,7 @@ app.secret_key = 'secret!'
 # Configuration: list of OpenVPN management interface profiles.
 # Each profile must include a unique name and its corresponding UNIX socket path.
 profiles_config = [
-    {"name": "OVPN_tracker", "socket_path": "/run/openvpn/pt.sock"},
+    {"name": "profile1", "socket_path": "/run/openvpn/pt.sock"},
     # You can add more profiles here, for example:
     # {"name": "profile2", "socket_path": "/run/openvpn/profile2.sock"},
 ]
