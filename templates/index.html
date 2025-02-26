@@ -1,239 +1,270 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenVPN Monitor</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    
+    <!-- Custom CSS -->
     <style>
         body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background-color: #f4f7fa;
+            padding: 20px;
         }
-        .profile {
+        
+        .container-fluid {
+            max-width: 1400px;
+        }
+
+        .profile-card {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 20px;
             margin-bottom: 30px;
-            border: 1px solid #ccc;
-            padding: 15px;
-            border-radius: 5px;
+            transition: transform 0.2s ease;
         }
-        h2 {
-            margin-top: 0;
+
+        .profile-card:hover {
+            transform: translateY(-5px);
         }
-        table {
-            width: 100%;
-            border-collapse: collapse;
+
+        .profile-card h2 {
+            font-size: 1.5rem;
+            color: #2c3e50;
             margin-bottom: 20px;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
         }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
+
+        .table-responsive {
+            border-radius: 10px;
+            overflow: hidden;
         }
-        th {
-            background-color: #f2f2f2;
+
+        .table {
+            margin-bottom: 0;
+            background-color: white;
         }
-        tr:nth-child(even) {
-            background-color: #f9f9f9;
-        }
-        .button {
-            background-color: #f44336;
+
+        .table thead th {
+            background-color: #3498db;
             color: white;
-            padding: 5px 10px;
             border: none;
-            border-radius: 3px;
-            cursor: pointer;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
-        .flash {
-            padding: 10px;
-            margin: 10px 0;
+
+        .table tbody tr {
+            transition: background-color 0.2s ease;
+        }
+
+        .table tbody tr:hover {
+            background-color: #f1f8ff;
+        }
+
+        .btn-kill {
+            background-color: #e74c3c;
+            border: none;
+            padding: 5px 15px;
+            font-size: 0.9rem;
             border-radius: 5px;
+            transition: background-color 0.3s ease;
         }
-        .flash-success {
-            background-color: #d4edda;
-            color: #155724;
+
+        .btn-kill:hover {
+            background-color: #c0392b;
         }
-        .flash-error {
-            background-color: #f8d7da;
-            color: #721c24;
+
+        .flash {
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }
-        .flash-info {
-            background-color: #d1ecf1;
-            color: #0c5460;
-        }
+
         .ip-history {
-            font-size: 0.85em;
-            color: #666;
+            font-size: 0.85rem;
+            color: #7f8c8d;
+            font-style: italic;
+        }
+
+        /* Animation for flash messages */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .flash {
+            animation: fadeIn 0.5s ease-in;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #3498db;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #2980b9;
         }
     </style>
-    <!-- Include Socket.IO client library -->
-    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
 </head>
 <body>
-    <h1>OpenVPN Monitor</h1>
-    
-    <!-- Flash messages -->
-    {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-            {% for category, message in messages %}
-                <div class="flash flash-{{ category }}">{{ message }}</div>
-            {% endfor %}
-        {% endif %}
-    {% endwith %}
-    
-    <div id="profiles-container">
-        {% for profile_name, clients in profile_data.items() %}
-        <div class="profile" id="profile-{{ profile_name }}">
-            <h2>{{ profile_name }}</h2>
-            {% if clients %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>Common Name</th>
-                        <th>Real Address</th>
-                        <th>Connected Since</th>
-                        <th>Runtime</th>
-                        <th>IP History</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for client in clients %}
-                    <tr>
-                        <td>{{ client.common_name }}</td>
-                        <td>{{ client.real_address }}</td>
-                        <td>{{ client.connected_since }}</td>
-                        <td class="runtime-cell">{{ client.runtime }}</td>
-                        <td class="ip-history">
-                            {% if client.common_name in profile_ip_log %}
-                                {{ profile_ip_log[client.common_name]|join(", ") }}
-                            {% endif %}
-                        </td>
-                        <td>
-                            <form method="POST" action="{{ url_for('kill_client', profile_name=profile_name, client_name=client.common_name) }}">
-                                <button type="submit" class="button">Kill</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <p>No active clients for this profile.</p>
+    <div class="container-fluid">
+        <h1 class="mb-4 text-center text-primary">OpenVPN Monitor</h1>
+
+        <!-- Flash messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash alert alert-{{ category == 'success' and 'success' or category == 'error' and 'danger' or 'info' }}">
+                        {{ message }}
+                    </div>
+                {% endfor %}
             {% endif %}
+        {% endwith %}
+
+        <!-- Profiles -->
+        <div id="profiles-container">
+            {% for profile_name, clients in profile_data.items() %}
+            <div class="profile-card" id="profile-{{ profile_name }}">
+                <h2>{{ profile_name }}</h2>
+                {% if clients %}
+                <div class="table-responsive">
+                    <table class="table table-striped align-middle">
+                        <thead>
+                            <tr>
+                                <th>Common Name</th>
+                                <th>Real Address</th>
+                                <th>Connected Since</th>
+                                <th>Runtime</th>
+                                <th>IP History</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for client in clients %}
+                            <tr>
+                                <td>{{ client.common_name }}</td>
+                                <td>{{ client.real_address }}</td>
+                                <td data-connected-time="{{ client.connected_since }}">{{ client.connected_since }}</td>
+                                <td class="runtime-cell" data-common-name="{{ client.common_name }}">{{ client.runtime }}</td>
+                                <td class="ip-history">
+                                    {% if client.common_name in profile_ip_log %}
+                                        {{ profile_ip_log[client.common_name]|join(", ") }}
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <form method="POST" action="{{ url_for('kill_client', profile_name=profile_name, client_name=client.common_name) }}">
+                                        <button type="submit" class="btn btn-kill">Kill</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted">No active clients for this profile.</p>
+                {% endif %}
+            </div>
+            {% endfor %}
         </div>
-        {% endfor %}
     </div>
 
+    <!-- Bootstrap JS (for interactivity if needed) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+
+    <!-- JavaScript for real-time updates -->
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // Connect to the Socket.IO server
             const socket = io();
-            
-            // Handle the data_update event
+
             socket.on('data_update', function(data) {
                 updateProfiles(data.profile_data, data.profile_ip_log);
                 initializeRuntimeUpdates();
             });
-            
-            // Function to update the profile data in the DOM
+
             function updateProfiles(profileData, profileIpLog) {
                 const container = document.getElementById('profiles-container');
-                
-                // Clear existing content
                 container.innerHTML = '';
-                
-                // Rebuild the profiles
+
                 for (const [profileName, clients] of Object.entries(profileData)) {
                     const profileDiv = document.createElement('div');
-                    profileDiv.className = 'profile';
+                    profileDiv.className = 'profile-card';
                     profileDiv.id = `profile-${profileName}`;
-                    
+
                     const title = document.createElement('h2');
                     title.textContent = profileName;
                     profileDiv.appendChild(title);
-                    
+
                     if (clients && clients.length > 0) {
+                        const tableResponsive = document.createElement('div');
+                        tableResponsive.className = 'table-responsive';
+
                         const table = document.createElement('table');
-                        
-                        // Create table header
+                        table.className = 'table table-striped align-middle';
+
                         const thead = document.createElement('thead');
                         const headerRow = document.createElement('tr');
-                        
-                        const headers = ['Common Name', 'Real Address', 'Connected Since', 'Runtime', 'IP History', 'Actions'];
-                        headers.forEach(headerText => {
+                        ['Common Name', 'Real Address', 'Connected Since', 'Runtime', 'IP History', 'Actions'].forEach(text => {
                             const th = document.createElement('th');
-                            th.textContent = headerText;
+                            th.textContent = text;
                             headerRow.appendChild(th);
                         });
-                        
                         thead.appendChild(headerRow);
                         table.appendChild(thead);
-                        
-                        // Create table body
+
                         const tbody = document.createElement('tbody');
-                        
                         clients.forEach(client => {
                             const row = document.createElement('tr');
-                            
-                            // Common name cell
-                            const nameCell = document.createElement('td');
-                            nameCell.textContent = client.common_name;
-                            row.appendChild(nameCell);
-                            
-                            // Real address cell
-                            const addressCell = document.createElement('td');
-                            addressCell.textContent = client.real_address;
-                            row.appendChild(addressCell);
-                            
-                            // Connected since cell
-                            const connectedCell = document.createElement('td');
-                            connectedCell.textContent = client.connected_since;
-                            connectedCell.setAttribute('data-connected-time', client.connected_since);
-                            row.appendChild(connectedCell);
-                            
-                            // Runtime cell
-                            const runtimeCell = document.createElement('td');
-                            runtimeCell.className = 'runtime-cell';
-                            runtimeCell.textContent = client.runtime;
-                            runtimeCell.setAttribute('data-common-name', client.common_name);
-                            row.appendChild(runtimeCell);
-                            
-                            // IP history cell
-                            const ipHistoryCell = document.createElement('td');
-                            ipHistoryCell.className = 'ip-history';
-                            if (profileIpLog[client.common_name]) {
-                                ipHistoryCell.textContent = profileIpLog[client.common_name].join(', ');
-                            }
-                            row.appendChild(ipHistoryCell);
-                            
-                            // Actions cell
-                            const actionsCell = document.createElement('td');
-                            const form = document.createElement('form');
-                            form.method = 'POST';
-                            form.action = `/kill/${profileName}/${client.common_name}`;
-                            
-                            const button = document.createElement('button');
-                            button.type = 'submit';
-                            button.className = 'button';
-                            button.textContent = 'Kill';
-                            
-                            form.appendChild(button);
-                            actionsCell.appendChild(form);
-                            row.appendChild(actionsCell);
-                            
+
+                            row.innerHTML = `
+                                <td>${client.common_name}</td>
+                                <td>${client.real_address}</td>
+                                <td data-connected-time="${client.connected_since}">${client.connected_since}</td>
+                                <td class="runtime-cell" data-common-name="${client.common_name}">${client.runtime}</td>
+                                <td class="ip-history">${profileIpLog[client.common_name] ? profileIpLog[client.common_name].join(', ') : ''}</td>
+                                <td>
+                                    <form method="POST" action="/kill/${profileName}/${client.common_name}">
+                                        <button type="submit" class="btn btn-kill">Kill</button>
+                                    </form>
+                                </td>
+                            `;
                             tbody.appendChild(row);
                         });
-                        
+
                         table.appendChild(tbody);
-                        profileDiv.appendChild(table);
+                        tableResponsive.appendChild(table);
+                        profileDiv.appendChild(tableResponsive);
                     } else {
                         const noClients = document.createElement('p');
+                        noClients.className = 'text-muted';
                         noClients.textContent = 'No active clients for this profile.';
                         profileDiv.appendChild(noClients);
                     }
-                    
+
                     container.appendChild(profileDiv);
                 }
             }
 
-            // Function to update runtimes without server updates
             function updateRuntimes() {
                 const runtimeCells = document.querySelectorAll('.runtime-cell');
                 runtimeCells.forEach(cell => {
@@ -241,53 +272,37 @@
                     if (connectedCell && connectedCell.hasAttribute('data-connected-time')) {
                         const connectedTime = connectedCell.getAttribute('data-connected-time');
                         try {
-                            // Parse the date (OpenVPN format is YYYY-MM-DD HH:MM:SS)
                             const parts = connectedTime.split(' ');
                             if (parts.length === 2) {
                                 const dateParts = parts[0].split('-');
                                 const timeParts = parts[1].split(':');
-                                
-                                if (dateParts.length === 3 && timeParts.length === 3) {
-                                    const year = parseInt(dateParts[0]);
-                                    const month = parseInt(dateParts[1]) - 1; // JavaScript months are 0-based
-                                    const day = parseInt(dateParts[2]);
-                                    const hour = parseInt(timeParts[0]);
-                                    const minute = parseInt(timeParts[1]);
-                                    const second = parseInt(timeParts[2]);
-                                    
-                                    const connTime = new Date(year, month, day, hour, minute, second);
-                                    const now = new Date();
-                                    const diffMs = now - connTime;
-                                    const diffSec = Math.floor(diffMs / 1000);
-                                    
-                                    const hours = Math.floor(diffSec / 3600);
-                                    const minutes = Math.floor((diffSec % 3600) / 60);
-                                    const seconds = diffSec % 60;
-                                    
-                                    cell.textContent = 
-                                        String(hours).padStart(2, '0') + ':' +
-                                        String(minutes).padStart(2, '0') + ':' +
-                                        String(seconds).padStart(2, '0');
-                                }
+                                const connTime = new Date(
+                                    parseInt(dateParts[0]),
+                                    parseInt(dateParts[1]) - 1,
+                                    parseInt(dateParts[2]),
+                                    parseInt(timeParts[0]),
+                                    parseInt(timeParts[1]),
+                                    parseInt(timeParts[2])
+                                );
+                                const now = new Date();
+                                const diffSec = Math.floor((now - connTime) / 1000);
+                                const hours = Math.floor(diffSec / 3600);
+                                const minutes = Math.floor((diffSec % 3600) / 60);
+                                const seconds = diffSec % 60;
+                                cell.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
                             }
                         } catch (e) {
                             console.error('Error updating runtime:', e);
-                            // Keep existing runtime if parsing fails
                         }
                     }
                 });
             }
-            
-            // Initialize the runtime updates
+
             function initializeRuntimeUpdates() {
-                // Update immediately after loading
                 updateRuntimes();
             }
-            
-            // Set up periodic runtime updates (every second)
+
             setInterval(updateRuntimes, 1000);
-            
-            // Initialize runtime updates for the initial page load
             initializeRuntimeUpdates();
         });
     </script>
