@@ -8,9 +8,20 @@ import requests
 import json
 from collections import deque
 import logging
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import desc
+import os
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
+
+# Database configuration
+db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ovpn_monitor.db')
+os.makedirs(os.path.dirname(db_path), exist_ok=True)  # Create the data directory if it doesn't exist
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
 socketio = SocketIO(app)
 
 # Configure logging
@@ -37,9 +48,46 @@ profiles_config = [
 profile_data = {}     # { profile_name: [ { "common_name": ..., "runtime": ..., "real_address": ..., "connected_since": ... }, ... ] }
 profile_ip_log = {}   # { common_name: set([ip1, ip2, ...]) }
 
+class ConnectionHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    profile = db.Column(db.String(100), nullable=False)
+    common_name = db.Column(db.String(100), nullable=False)
+    real_address = db.Column(db.String(100), nullable=False)
+    location = db.Column(db.String(200))
+    connected_since = db.Column(db.DateTime, nullable=False)
+    disconnected_at = db.Column(db.DateTime, nullable=False)
+    runtime = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "profile": self.profile,
+            "common_name": self.common_name,
+            "real_address": self.real_address,
+            "location": self.location,
+            "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
+            "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "runtime": self.runtime
+        }
+
 # Connection history (limited to the most recent 100 entries)
 # Contains disconnected clients with their information
 connection_history = deque(maxlen=100)  # [{common_name, real_address, location, connected_since, disconnected_at, runtime, profile}]
+
+def load_connection_history():
+    """
+    Load recent connection history from the database into the in-memory cache
+    """
+    global connection_history
+    history_records = ConnectionHistory.query.order_by(
+        desc(ConnectionHistory.disconnected_at)
+    ).limit(100).all()
+    
+    connection_history = deque(
+        [record.to_dict() for record in history_records],
+        maxlen=100
+    )
+    logger.info(f"Loaded {len(connection_history)} connection history records from database")
 
 # Cache for IP geolocation data
 ip_location_cache = {}  # {ip: {country: ..., city: ...}}
@@ -191,19 +239,35 @@ def update_profile_status():
                 # Add to connection history
                 disconnected_at = datetime.datetime.now()
                 
-                history_entry = {
-                    "common_name": client_data["common_name"],
-                    "real_address": client_data["real_address"],
-                    "connected_since": client_data["connected_since"],
-                    "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "runtime": client_data["runtime"],
-                    "location": client_data["location"],
-                    "profile": profile_name
-                }
-                
-                connection_history.appendleft(history_entry)
-                logger.info(f"Added to history: {history_entry}")
-                data_changed = True
+                # Create connection history entry in database
+                try:
+                    # Parse the connected_since string into a datetime object
+                    connected_since = datetime.datetime.strptime(
+                        client_data["connected_since"], 
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    
+                    history_record = ConnectionHistory(
+                        profile=profile_name,
+                        common_name=client_data["common_name"],
+                        real_address=client_data["real_address"],
+                        location=client_data["location"],
+                        connected_since=connected_since,
+                        disconnected_at=disconnected_at,
+                        runtime=client_data["runtime"]
+                    )
+                    db.session.add(history_record)
+                    db.session.commit()
+                    
+                    # Also add to the in-memory cache
+                    history_entry = history_record.to_dict()
+                    connection_history.appendleft(history_entry)
+                    
+                    logger.info(f"Added to history DB: {history_entry}")
+                    data_changed = True
+                except Exception as e:
+                    logger.error(f"Error adding connection to history DB: {e}")
+                    db.session.rollback()
         
         # Update previous clients map for next iteration
         previous_clients_map = current_clients_map.copy()
@@ -280,20 +344,39 @@ def kill_client(profile_name, client_name):
             # Add to connection history if we found the client data
             if client_data:
                 disconnected_at = datetime.datetime.now()
-                connection_history.appendleft({
-                    "common_name": client_data["common_name"],
-                    "real_address": client_data["real_address"],
-                    "connected_since": client_data["connected_since"],
-                    "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "runtime": client_data["runtime"],
-                    "location": client_data["location"],
-                    "profile": profile_name
-                })
-                # Also remove this client from the previous_clients_map to prevent duplicate entries
-                client_key = (profile_name, client_name)
-                if client_key in previous_clients_map:
-                    del previous_clients_map[client_key]
-                logger.info(f"Added killed client to history: {client_name}")
+                
+                try:
+                    # Parse the connected_since string into a datetime object
+                    connected_since = datetime.datetime.strptime(
+                        client_data["connected_since"], 
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    
+                    history_record = ConnectionHistory(
+                        profile=profile_name,
+                        common_name=client_data["common_name"],
+                        real_address=client_data["real_address"],
+                        location=client_data["location"],
+                        connected_since=connected_since,
+                        disconnected_at=disconnected_at,
+                        runtime=client_data["runtime"]
+                    )
+                    db.session.add(history_record)
+                    db.session.commit()
+                    
+                    # Also add to the in-memory cache
+                    history_entry = history_record.to_dict()
+                    connection_history.appendleft(history_entry)
+                    
+                    # Also remove this client from the previous_clients_map to prevent duplicate entries
+                    client_key = (profile_name, client_name)
+                    if client_key in previous_clients_map:
+                        del previous_clients_map[client_key]
+                        
+                    logger.info(f"Added killed client to history DB: {client_name}")
+                except Exception as e:
+                    logger.error(f"Error adding killed client to history DB: {e}")
+                    db.session.rollback()
         else:
             flash(f"Kill command response: {response}", "info")
     except Exception as e:
@@ -305,5 +388,8 @@ def start_background_thread():
     threading.Thread(target=update_profile_status, daemon=True).start()
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()  # Create database tables if they don't exist
+        load_connection_history()  # Load existing history from database
     start_background_thread()
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
