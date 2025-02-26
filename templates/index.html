@@ -129,6 +129,7 @@
             // Handle the data_update event
             socket.on('data_update', function(data) {
                 updateProfiles(data.profile_data, data.profile_ip_log);
+                initializeRuntimeUpdates();
             });
             
             // Function to update the profile data in the DOM
@@ -184,12 +185,14 @@
                             // Connected since cell
                             const connectedCell = document.createElement('td');
                             connectedCell.textContent = client.connected_since;
+                            connectedCell.setAttribute('data-connected-time', client.connected_since);
                             row.appendChild(connectedCell);
                             
                             // Runtime cell
                             const runtimeCell = document.createElement('td');
                             runtimeCell.className = 'runtime-cell';
                             runtimeCell.textContent = client.runtime;
+                            runtimeCell.setAttribute('data-common-name', client.common_name);
                             row.appendChild(runtimeCell);
                             
                             // IP history cell
@@ -229,6 +232,63 @@
                     container.appendChild(profileDiv);
                 }
             }
+
+            // Function to update runtimes without server updates
+            function updateRuntimes() {
+                const runtimeCells = document.querySelectorAll('.runtime-cell');
+                runtimeCells.forEach(cell => {
+                    const connectedCell = cell.previousElementSibling;
+                    if (connectedCell && connectedCell.hasAttribute('data-connected-time')) {
+                        const connectedTime = connectedCell.getAttribute('data-connected-time');
+                        try {
+                            // Parse the date (OpenVPN format is YYYY-MM-DD HH:MM:SS)
+                            const parts = connectedTime.split(' ');
+                            if (parts.length === 2) {
+                                const dateParts = parts[0].split('-');
+                                const timeParts = parts[1].split(':');
+                                
+                                if (dateParts.length === 3 && timeParts.length === 3) {
+                                    const year = parseInt(dateParts[0]);
+                                    const month = parseInt(dateParts[1]) - 1; // JavaScript months are 0-based
+                                    const day = parseInt(dateParts[2]);
+                                    const hour = parseInt(timeParts[0]);
+                                    const minute = parseInt(timeParts[1]);
+                                    const second = parseInt(timeParts[2]);
+                                    
+                                    const connTime = new Date(year, month, day, hour, minute, second);
+                                    const now = new Date();
+                                    const diffMs = now - connTime;
+                                    const diffSec = Math.floor(diffMs / 1000);
+                                    
+                                    const hours = Math.floor(diffSec / 3600);
+                                    const minutes = Math.floor((diffSec % 3600) / 60);
+                                    const seconds = diffSec % 60;
+                                    
+                                    cell.textContent = 
+                                        String(hours).padStart(2, '0') + ':' +
+                                        String(minutes).padStart(2, '0') + ':' +
+                                        String(seconds).padStart(2, '0');
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Error updating runtime:', e);
+                            // Keep existing runtime if parsing fails
+                        }
+                    }
+                });
+            }
+            
+            // Initialize the runtime updates
+            function initializeRuntimeUpdates() {
+                // Update immediately after loading
+                updateRuntimes();
+            }
+            
+            // Set up periodic runtime updates (every second)
+            setInterval(updateRuntimes, 1000);
+            
+            // Initialize runtime updates for the initial page load
+            initializeRuntimeUpdates();
         });
     </script>
 </body>
