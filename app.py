@@ -11,6 +11,7 @@ import logging
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc, inspect, text
 import os
+from maxminddb import open_database
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
@@ -37,7 +38,7 @@ logger = logging.getLogger('ovpn-monitor')
 # Configuration: list of OpenVPN management interface profiles.
 # Each profile must include a unique name and its corresponding UNIX socket path.
 profiles_config = [
-    {"name": "profile1", "socket_path": "/run/openvpn/pt.sock"},
+    {"name": "Active BKCTF players", "socket_path": "/run/openvpn/pt.sock"},
     # You can add more profiles here, for example:
     # {"name": "profile2", "socket_path": "/run/openvpn/profile2.sock"},
 ]
@@ -58,26 +59,29 @@ class ConnectionHistory(db.Model):
     disconnected_at = db.Column(db.DateTime, nullable=False)
     runtime = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    disconnect_type = db.Column(db.String(50), default="client-side")  # Added to track disconnect type
+    disconnect_type = db.Column(db.String(50), default="client-side")
+    lat = db.Column(db.Float)  # New field for latitude
+    lon = db.Column(db.Float)  # New field for longitude
 
-    def to_dict(self):
-        result = {
-            "profile": self.profile,
-            "common_name": self.common_name,
-            "real_address": self.real_address,
-            "location": self.location,
-            "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
-            "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "runtime": self.runtime
-        }
+def to_dict(self):
+    result = {
+        "profile": self.profile,
+        "common_name": self.common_name,
+        "real_address": self.real_address,
+        "location": self.location,
+        "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
+        "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "runtime": self.runtime,
+        "lat": self.lat,
+        "lon": self.lon
+    }
+    
+    if hasattr(self, 'disconnect_type') and self.disconnect_type is not None:
+        result["disconnect_type"] = self.disconnect_type
+    else:
+        result["disconnect_type"] = "client-side"
         
-        # Add disconnect_type if it exists (to handle old records in DB)
-        if hasattr(self, 'disconnect_type') and self.disconnect_type is not None:
-            result["disconnect_type"] = self.disconnect_type
-        else:
-            result["disconnect_type"] = "client-side"  # default for old records
-            
-        return result
+    return result
 
 # Connection history (limited to the most recent 100 entries)
 # Contains disconnected clients with their information
@@ -134,68 +138,61 @@ ip_location_cache = {}  # {ip: {country: ..., city: ...}}
 previous_clients_map = {}  # {(profile_name, common_name): client_data}
 
 def get_ip_location(ip):
-    """
-    Get location information for an IP address using a free geolocation API.
-    Caches results to avoid repeated API calls for the same IP.
-    """
-    # Return cached result if available
     if ip in ip_location_cache:
         return ip_location_cache[ip]
     
     try:
-        # Use ip-api.com which is free and doesn't require API key
-        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("status") == "success":
-                location = {
-                    "country": data.get("country", "Unknown"),
-                    "city": data.get("city", "Unknown"),
-                    "region": data.get("regionName", "")
-                }
-                # Cache the result
-                ip_location_cache[ip] = location
-                return location
+        response = reader.get(ip)
+        if response:
+            city = response.get('city', {}).get('names', {}).get('en', 'Unknown')
+            country = response.get('country', {}).get('names', {}).get('en', 'Unknown')
+            region = response.get('subdivisions', [{}])[0].get('names', {}).get('en', '')
+            lat = response.get('location', {}).get('latitude', None)
+            lon = response.get('location', {}).get('longitude', None)
+            location = {
+                "country": country,
+                "city": city,
+                "region": region,
+                "lat": lat,
+                "lon": lon
+            }
+            ip_location_cache[ip] = location
+            return location
     except Exception as e:
         logger.error(f"Error getting location for IP {ip}: {e}")
     
-    # Return default if API call fails
-    default = {"country": "Unknown", "city": "Unknown", "region": ""}
+    default = {"country": "Unknown", "city": "Unknown", "region": "", "lat": None, "lon": None}
     ip_location_cache[ip] = default
     return default
 
 def add_to_connection_history(profile_name, client_data, disconnect_type="client-side"):
-    """
-    Helper function to add a client to the connection history database and in-memory cache
-    Returns True if successful, False otherwise
-    """
     try:
         disconnected_at = datetime.datetime.now()
-        # Parse the connected_since string into a datetime object
         connected_since = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
+        location_dict = get_ip_location(client_data["real_address"])
+        location_str = f"{location_dict['city']}, {location_dict['country']}"
+        lat = location_dict["lat"]
+        lon = location_dict["lon"]
         
-        # Create a new session for this specific operation
         with app.app_context():
-            # Create the record within the context
             history_record = ConnectionHistory(
                 profile=profile_name,
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
-                location=client_data["location"],
+                location=location_str,
                 connected_since=connected_since,
                 disconnected_at=disconnected_at,
                 runtime=client_data["runtime"],
-                disconnect_type=disconnect_type
+                disconnect_type=disconnect_type,
+                lat=lat,
+                lon=lon
             )
-            
-            # Add to session and commit within the context
             db.session.add(history_record)
             db.session.commit()
             
-            # Create the dict representation while still in context
             history_entry = {
                 "profile": history_record.profile,
                 "common_name": history_record.common_name,
@@ -204,22 +201,16 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
                 "connected_since": connected_since.strftime("%Y-%m-%d %H:%M:%S"),
                 "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "runtime": history_record.runtime,
-                "disconnect_type": history_record.disconnect_type
+                "disconnect_type": history_record.disconnect_type,
+                "lat": history_record.lat,
+                "lon": history_record.lon
             }
-        
-        # Now outside the context, we can safely use the dict representation
         connection_history.appendleft(history_entry)
-        
-        logger.info(f"Added to history DB: {client_data['common_name']} ({disconnect_type})")
         return True
     except Exception as e:
         logger.error(f"Error adding connection to history DB: {e}")
-        try:
-            # Ensure we rollback if there was an error
-            with app.app_context():
-                db.session.rollback()
-        except:
-            pass
+        with app.app_context():
+            db.session.rollback()
         return False
 
 def update_profile_status():
@@ -291,16 +282,17 @@ def update_profile_status():
                                 ip = real_address.split(':')[0]
                                 
                                 # Get location information for the IP
-                                location = get_ip_location(ip)
-                                location_str = f"{location['city']}, {location['country']}"
-                                
+                                location_dict = get_ip_location(ip)
+                                location_str = f"{location_dict['city']}, {location_dict['country']}"
                                 client_data = {
                                     "common_name": common_name,
-                                    "real_address": ip,  # Store only IP address, not port
-                                    "real_address_full": real_address,  # Keep full address in a separate field
+                                    "real_address": ip,
+                                    "real_address_full": real_address,
                                     "connected_since": connected_since,
                                     "runtime": runtime,
-                                    "location": location_str
+                                    "location": location_str,
+                                    "lat": location_dict["lat"],
+                                    "lon": location_dict["lon"]
                                 }
                                 
                                 clients.append(client_data)
@@ -431,6 +423,12 @@ def kill_client(profile_name, client_name):
 
 # Start the background thread.
 def start_background_thread():
+    global reader
+    maxmind_db_path = os.path.join(os.path.abspath(__file__), 'data', 'GeoLite2-City.mmdb')
+    try:
+        reader = open_database(maxmind_db_path)
+    except Exception as e:
+        logger.error(f"Error opening MaxMind database: {e}")
     threading.Thread(target=update_profile_status, daemon=True).start()
 
 if __name__ == '__main__':

@@ -11,7 +11,10 @@
     
     <!-- Socket.IO -->
     <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
-    
+    <!-- Map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" integrity="sha256-kLaT2GOSpHechhsoLVRB3flN8T2kdE1ZmeBzB6+3Nyt4=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" integrity="sha256-WBkoXOwTeyKcvk4ajflKt4nILytaUAqcxQ3SbFXQ+9I=" crossorigin=""></script>
+
     <!-- Custom CSS -->
     <style>
         body {
@@ -281,6 +284,7 @@
                     </div>
                     {% endfor %}
                 </div>
+                <div id="map-active" style="height: 400px; width: 100%;"></div>
             </div>
             
             <!-- Connection History Tab -->
@@ -327,7 +331,9 @@
                     <p class="text-muted">No connection history yet.</p>
                     {% endif %}
                 </div>
+                <div id="map-history" style="height: 400px; width: 100%;"></div>
             </div>
+            
         </div>
     </div>
 
@@ -338,12 +344,63 @@
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             const socket = io();
+            const mapActive = L.map('map-active').setView([0, 0], 2);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(mapActive);
+            const mapHistory = L.map('map-history').setView([0, 0], 2);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(mapHistory);
+            const activeMarkers = L.featureGroup().addTo(mapActive);
+            const historyMarkers = L.featureGroup().addTo(mapHistory);
+            let profileData, profileIpLog, connectionHistory, currentSearchTerm = '';
 
-            socket.on('data_update', function(data) {
-                updateProfiles(data.profile_data, data.profile_ip_log);
-                updateConnectionHistory(data.connection_history);
-                initializeRuntimeUpdates();
-            });
+            function updateActiveMap() {
+                activeMarkers.clearLayers();
+                for (const [profileName, clients] of Object.entries(profileData)) {
+                    clients.forEach(client => {
+                        if (client.lat && client.lon) {
+                            const marker = L.marker([client.lat, client.lon]).bindTooltip(client.common_name);
+                            activeMarkers.addLayer(marker);
+                        }
+                    });
+                }
+                if (activeMarkers.getLayers().length > 0) {
+                    mapActive.fitBounds(activeMarkers.getBounds());
+                } else {
+                    mapActive.setView([0, 0], 2);
+                }
+            }
+
+            function updateHistoryMap(filteredHistory) {
+                historyMarkers.clearLayers();
+                filteredHistory.forEach(entry => {
+                    if (entry.lat && entry.lon) {
+                        const marker = L.marker([entry.lat, entry.lon]).bindTooltip(entry.common_name + ' - ' + entry.connected_since);
+                        historyMarkers.addLayer(marker);
+                    }
+                });
+                if (historyMarkers.getLayers().length > 0) {
+                    mapHistory.fitBounds(historyMarkers.getBounds());
+                } else {
+                    mapHistory.setView([0, 0], 2);
+                }
+            }
+
+            function filterHistory(searchTerm) {
+                return connectionHistory.filter(entry => {
+                    const text = [
+                        entry.common_name,
+                        entry.real_address,
+                        entry.location,
+                        entry.connected_since,
+                        entry.disconnected_at,
+                        entry.disconnect_type
+                    ].join(' ').toLowerCase();
+                    return text.includes(searchTerm.toLowerCase());
+                });
+            }
 
             function updateProfiles(profileData, profileIpLog) {
                 const container = document.getElementById('profiles-container');
@@ -542,39 +599,51 @@
                 const historyTab = document.getElementById('history');
                 const historyTable = historyTab.querySelector('#history-table');
                 if (historyTable) {
+                    const filteredHistory = filterHistory(searchTerm);
                     const historyRows = historyTable.querySelectorAll('tbody tr');
-                    let historyVisibleCount = 0;
-                    
-                    historyRows.forEach(row => {
-                        const text = row.textContent.toLowerCase();
-                        if (searchTerm === '' || text.includes(searchTerm)) {
+                    historyRows.forEach((row, index) => {
+                        if (index < filteredHistory.length) {
                             row.style.display = '';
-                            historyVisibleCount++;
                         } else {
                             row.style.display = 'none';
                         }
                     });
-                    
-                    // Show/hide "No matching history entries" message
                     const historyCard = historyTable.closest('.history-card');
                     const existingSearchMsg = historyCard.querySelector('.search-message');
-                    if (existingSearchMsg) {
-                        existingSearchMsg.remove();
-                    }
-                    
-                    if (historyVisibleCount === 0 && historyRows.length > 0) {
-                        // All rows are filtered out
+                    if (existingSearchMsg) existingSearchMsg.remove();
+                    if (filteredHistory.length === 0) {
                         const msg = document.createElement('p');
                         msg.className = 'text-muted search-message';
                         msg.textContent = 'No matching history entries.';
                         historyCard.appendChild(msg);
                         historyTable.style.display = 'none';
                     } else {
-                        // Some rows are visible
-                        if (historyTable) historyTable.style.display = '';
+                        historyTable.style.display = '';
                     }
+                    updateHistoryMap(filteredHistory);
                 }
             }
+
+            socket.on('data_update', function(data) {
+                profileData = data.profile_data;
+                profileIpLog = data.profile_ip_log;
+                connectionHistory = data.connection_history;
+                updateProfiles(profileData, profileIpLog);
+                updateConnectionHistory(connectionHistory);
+                initializeRuntimeUpdates();
+                updateActiveMap();
+                performSearch(currentSearchTerm);
+            });
+
+            document.getElementById('searchInput').addEventListener('input', function() {
+                currentSearchTerm = this.value.toLowerCase().trim();
+                performSearch(currentSearchTerm);
+            });
+            document.getElementById('clearSearch').addEventListener('click', function() {
+                document.getElementById('searchInput').value = '';
+                currentSearchTerm = '';
+                performSearch('');
+            });
         });
     </script>
 </body>
