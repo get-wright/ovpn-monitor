@@ -171,6 +171,30 @@
             display: inline-block;
             margin-top: 3px;
         }
+        .search-container {
+            max-width: 600px;
+            margin: 0 auto 20px;
+        }
+
+        .search-container .form-control {
+            border-radius: 20px 0 0 20px;
+            border: 1px solid #3498db;
+            box-shadow: none;
+            padding-left: 20px;
+        }
+
+        .search-container .btn {
+            border-radius: 0 20px 20px 0;
+        }
+        
+        .search-message {
+            padding: 10px;
+            text-align: center;
+            font-style: italic;
+            color: #777;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
@@ -197,6 +221,13 @@
                 <button class="nav-link" id="history-tab" data-bs-toggle="tab" data-bs-target="#history" type="button" role="tab" aria-controls="history" aria-selected="false">Connection History</button>
             </li>
         </ul>
+
+        <div class="search-container mb-4">
+            <div class="input-group">
+                <input type="text" id="searchInput" class="form-control" placeholder="Search by IP, username, or location...">
+                <button class="btn btn-primary" id="clearSearch">Clear</button>
+            </div>
+        </div>
 
         <!-- Tab content -->
         <div class="tab-content" id="monitorTabsContent">
@@ -455,6 +486,95 @@
 
             setInterval(updateRuntimes, 1000);
             initializeRuntimeUpdates();
+            // Search functionality
+            document.getElementById('searchInput').addEventListener('input', function() {
+                const searchTerm = this.value.toLowerCase().trim();
+                performSearch(searchTerm);
+            });
+
+            document.getElementById('clearSearch').addEventListener('click', function() {
+                document.getElementById('searchInput').value = '';
+                performSearch('');
+            });
+
+            function performSearch(searchTerm) {
+                // Search in active connections tab
+                const activeTab = document.getElementById('active');
+                const profileCards = activeTab.querySelectorAll('.profile-card');
+                
+                profileCards.forEach(profileCard => {
+                    const table = profileCard.querySelector('table');
+                    if (!table) return; // Skip if no table (no clients)
+                    
+                    const rows = table.querySelectorAll('tbody tr');
+                    let visibleCount = 0;
+                    
+                    rows.forEach(row => {
+                        const text = row.textContent.toLowerCase();
+                        if (searchTerm === '' || text.includes(searchTerm)) {
+                            row.style.display = '';
+                            visibleCount++;
+                        } else {
+                            row.style.display = 'none';
+                        }
+                    });
+                    
+                    // Show/hide "No matching clients" message
+                    const existingSearchMsg = profileCard.querySelector('.search-message');
+                    if (existingSearchMsg) {
+                        existingSearchMsg.remove();
+                    }
+                    
+                    if (visibleCount === 0 && rows.length > 0) {
+                        // All rows are filtered out
+                        const msg = document.createElement('p');
+                        msg.className = 'text-muted search-message';
+                        msg.textContent = 'No matching clients for this profile.';
+                        profileCard.appendChild(msg);
+                        table.style.display = 'none';
+                    } else {
+                        // Some rows are visible
+                        if (table) table.style.display = '';
+                    }
+                });
+                
+                // Search in history tab
+                const historyTab = document.getElementById('history');
+                const historyTable = historyTab.querySelector('#history-table');
+                if (historyTable) {
+                    const historyRows = historyTable.querySelectorAll('tbody tr');
+                    let historyVisibleCount = 0;
+                    
+                    historyRows.forEach(row => {
+                        const text = row.textContent.toLowerCase();
+                        if (searchTerm === '' || text.includes(searchTerm)) {
+                            row.style.display = '';
+                            historyVisibleCount++;
+                        } else {
+                            row.style.display = 'none';
+                        }
+                    });
+                    
+                    // Show/hide "No matching history entries" message
+                    const historyCard = historyTable.closest('.history-card');
+                    const existingSearchMsg = historyCard.querySelector('.search-message');
+                    if (existingSearchMsg) {
+                        existingSearchMsg.remove();
+                    }
+                    
+                    if (historyVisibleCount === 0 && historyRows.length > 0) {
+                        // All rows are filtered out
+                        const msg = document.createElement('p');
+                        msg.className = 'text-muted search-message';
+                        msg.textContent = 'No matching history entries.';
+                        historyCard.appendChild(msg);
+                        historyTable.style.display = 'none';
+                    } else {
+                        // Some rows are visible
+                        if (historyTable) historyTable.style.display = '';
+                    }
+                }
+            }
         });
     </script>
 </body>

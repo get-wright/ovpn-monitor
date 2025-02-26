@@ -199,7 +199,7 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
             history_entry = {
                 "profile": history_record.profile,
                 "common_name": history_record.common_name,
-                "real_address": history_record.real_address,
+                "real_address": history_record.real_address.split(':')[0] if ':' in history_record.real_address else history_record.real_address,
                 "location": history_record.location,
                 "connected_since": connected_since.strftime("%Y-%m-%d %H:%M:%S"),
                 "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -277,6 +277,7 @@ def update_profile_status():
                             if len(parts) >= 5:
                                 common_name = parts[0].strip()
                                 real_address = parts[1].strip()
+                                ip = real_address.split(':')[0]
                                 connected_since = parts[4].strip()
                                 
                                 try:
@@ -295,7 +296,8 @@ def update_profile_status():
                                 
                                 client_data = {
                                     "common_name": common_name,
-                                    "real_address": real_address,
+                                    "real_address": ip,  # Store only IP address, not port
+                                    "real_address_full": real_address,  # Keep full address in a separate field
                                     "connected_since": connected_since,
                                     "runtime": runtime,
                                     "location": location_str
