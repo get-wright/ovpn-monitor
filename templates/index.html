@@ -267,6 +267,7 @@
                                     <th>Connected</th>
                                     <th>Disconnected</th>
                                     <th>Duration</th>
+                                    <th>Disconnect Type</th>
                                 </tr>
                             </thead>
                             <tbody id="history-table-body">
@@ -279,6 +280,13 @@
                                     <td>{{ entry.connected_since }}</td>
                                     <td>{{ entry.disconnected_at }}</td>
                                     <td>{{ entry.runtime }}</td>
+                                    <td>
+                                        {% if entry.disconnect_type == "admin-kill" %}
+                                        <span class="badge bg-danger">Admin Kill</span>
+                                        {% else %}
+                                        <span class="badge bg-secondary">Client Side</span>
+                                        {% endif %}
+                                    </td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
@@ -378,6 +386,15 @@
                     document.getElementById('history-table').style.display = 'table';
                     history.forEach(entry => {
                         const row = document.createElement('tr');
+                        
+                        // Determine badge color and text based on disconnect type
+                        let disconnectBadge;
+                        if (entry.disconnect_type === "admin-kill") {
+                            disconnectBadge = '<span class="badge bg-danger">Admin Kill</span>';
+                        } else {
+                            disconnectBadge = '<span class="badge bg-secondary">Client Side</span>';
+                        }
+                        
                         row.innerHTML = `
                             <td>${entry.profile}</td>
                             <td>${entry.common_name}</td>
@@ -386,6 +403,7 @@
                             <td>${entry.connected_since}</td>
                             <td>${entry.disconnected_at}</td>
                             <td>${entry.runtime}</td>
+                            <td>${disconnectBadge}</td>
                         `;
                         tbody.appendChild(row);
                     });
