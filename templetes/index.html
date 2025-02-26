@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+    <title>OpenVPN Monitor</title>
+    <style>
+        table { border-collapse: collapse; width: 80%; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Active OpenVPN Profiles</h1>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul>
+        {% for category, message in messages %}
+          <li><strong>{{ category }}:</strong> {{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% for profile, clients in profile_data.items() %}
+        <h2>{{ profile }}</h2>
+        <table>
+            <tr>
+                <th>Common Name</th>
+                <th>Runtime</th>
+                <th>IP</th>
+                <th>Actions</th>
+            </tr>
+            {% for client in clients %}
+            <tr>
+                <td>{{ client.common_name }}</td>
+                <td>{{ client.runtime }}</td>
+                <td>{{ client.real_address.split(':')[0] }}</td>
+                <td>
+                    <form action="/kill/{{ profile }}/{{ client.common_name }}" method="post">
+                        <button type="submit">Kill</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <h3>IP Log for Profile {{ profile }}:</h3>
+        <ul>
+        {% for client in clients %}
+            <li>
+                <strong>{{ client.common_name }}:</strong>
+                {% if client.common_name in profile_ip_log %}
+                    {{ profile_ip_log[client.common_name] | list }}
+                {% else %}
+                    No IPs logged.
+                {% endif %}
+            </li>
+        {% endfor %}
+        </ul>
+    {% endfor %}
+</body>
+</html>
