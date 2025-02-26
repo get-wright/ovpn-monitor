@@ -11,6 +11,7 @@ import logging
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc, inspect, text
 import os
+import pytz
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
@@ -47,6 +48,17 @@ profiles_config = [
 # profile_ip_log maps client common names to a set of IP addresses seen.
 profile_data = {}     # { profile_name: [ { "common_name": ..., "runtime": ..., "real_address": ..., "connected_since": ... }, ... ] }
 profile_ip_log = {}   # { common_name: set([ip1, ip2, ...]) }
+
+@app.template_filter('to_utc7')
+def to_utc7_filter(dt_str):
+    # Parse the string to a datetime object
+    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    # Localize as UTC (assuming input is UTC)
+    dt_utc = pytz.UTC.localize(dt)
+    # Convert to UTC+7
+    dt_utc7 = dt_utc.astimezone(pytz.timezone('Asia/Jakarta'))
+    # Return formatted string
+    return dt_utc7.strftime("%Y-%m-%d %H:%M:%S")
 
 class ConnectionHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)

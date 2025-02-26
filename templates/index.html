@@ -227,7 +227,7 @@
                                         <td>{{ client.common_name }}</td>
                                         <td>{{ client.real_address }}</td>
                                         <td>{{ client.location }}</td>
-                                        <td data-connected-time="{{ client.connected_since }}">{{ client.connected_since }}</td>
+                                        <td data-connected-time="{{ client.connected_since | to_utc7 }}">{{ client.connected_since | to_utc7 }}</td>
                                         <td class="runtime-cell" data-common-name="{{ client.common_name }}">{{ client.runtime }}</td>
                                         <td class="ip-history">
                                             {% if client.common_name in profile_ip_log %}
@@ -277,8 +277,8 @@
                                     <td>{{ entry.common_name }}</td>
                                     <td>{{ entry.real_address }}</td>
                                     <td>{{ entry.location }}</td>
-                                    <td>{{ entry.connected_since }}</td>
-                                    <td>{{ entry.disconnected_at }}</td>
+                                    <td>{{ entry.connected_since | to_utc7 }}</td>
+                                    <td>{{ entry.disconnected_at | to_utc7 }}</td>
                                     <td>{{ entry.runtime }}</td>
                                     <td>
                                         {% if entry.disconnect_type == "admin-kill" %}
@@ -352,7 +352,7 @@
                                 <td>${client.common_name}</td>
                                 <td>${client.real_address}</td>
                                 <td>${client.location || 'Unknown'}</td>
-                                <td data-connected-time="${client.connected_since}">${client.connected_since}</td>
+                                <td data-connected-time="${client.connected_since | to_utc7}">${client.connected_since | to_utc7}</td>
                                 <td class="runtime-cell" data-common-name="${client.common_name}">${client.runtime}</td>
                                 <td class="ip-history">${profileIpLog[client.common_name] ? profileIpLog[client.common_name].join(', ') : ''}</td>
                                 <td>
@@ -400,8 +400,8 @@
                             <td>${entry.common_name}</td>
                             <td>${entry.real_address}</td>
                             <td>${entry.location}</td>
-                            <td>${entry.connected_since}</td>
-                            <td>${entry.disconnected_at}</td>
+                            <td>${entry.connected_since | to_utc7}</td>
+                            <td>${entry.disconnected_at | to_utc7}</td>
                             <td>${entry.runtime}</td>
                             <td>${disconnectBadge}</td>
                         `;
