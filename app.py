@@ -7,10 +7,21 @@ from flask_socketio import SocketIO
 import requests
 import json
 from collections import deque
+import logging
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
 socketio = SocketIO(app)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('ovpn-monitor')
 
 # Configuration: list of OpenVPN management interface profiles.
 # Each profile must include a unique name and its corresponding UNIX socket path.
@@ -28,10 +39,13 @@ profile_ip_log = {}   # { common_name: set([ip1, ip2, ...]) }
 
 # Connection history (limited to the most recent 100 entries)
 # Contains disconnected clients with their information
-connection_history = deque(maxlen=100)  # [{common_name, real_address, location, connected_since, disconnected_at, runtime}]
+connection_history = deque(maxlen=100)  # [{common_name, real_address, location, connected_since, disconnected_at, runtime, profile}]
 
 # Cache for IP geolocation data
 ip_location_cache = {}  # {ip: {country: ..., city: ...}}
+
+# Store a copy of previous clients for tracking disconnections 
+previous_clients_map = {}  # {(profile_name, common_name): client_data}
 
 def get_ip_location(ip):
     """
@@ -57,7 +71,7 @@ def get_ip_location(ip):
                 ip_location_cache[ip] = location
                 return location
     except Exception as e:
-        print(f"Error getting location for IP {ip}: {e}")
+        logger.error(f"Error getting location for IP {ip}: {e}")
     
     # Return default if API call fails
     default = {"country": "Unknown", "city": "Unknown", "region": ""}
@@ -69,12 +83,11 @@ def update_profile_status():
     Background thread function that periodically connects to each OpenVPN management interface,
     sends the "status" command, parses the output, and updates the client list and IP logs.
     """
-    # Keep track of active clients to detect disconnections
-    previous_active_clients = set()  # {(profile_name, common_name)}
+    global previous_clients_map
     
     while True:
         data_changed = False
-        current_active_clients = set()  # Track currently active clients
+        current_clients_map = {}  # Track currently active clients with their data
         
         for profile in profiles_config:
             try:
@@ -120,14 +133,11 @@ def update_profile_status():
                             real_address = parts[1].strip()
                             connected_since = parts[4].strip()
                             
-                            # Add to set of active clients
-                            client_key = (profile["name"], common_name)
-                            current_active_clients.add(client_key)
-                            
                             try:
                                 conn_time = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
                                 runtime = str(datetime.datetime.now() - conn_time).split('.')[0]
                             except Exception as ex:
+                                logger.error(f"Error parsing connection time: {ex}")
                                 runtime = "N/A"
                                 
                             # Extract the IP part (before the colon)
@@ -137,13 +147,19 @@ def update_profile_status():
                             location = get_ip_location(ip)
                             location_str = f"{location['city']}, {location['country']}"
                             
-                            clients.append({
+                            client_data = {
                                 "common_name": common_name,
                                 "real_address": real_address,
                                 "connected_since": connected_since,
                                 "runtime": runtime,
                                 "location": location_str
-                            })
+                            }
+                            
+                            clients.append(client_data)
+                            
+                            # Store in current clients map
+                            client_key = (profile["name"], common_name)
+                            current_clients_map[client_key] = client_data
                             
                             # Update the IP log
                             if common_name not in profile_ip_log:
@@ -160,38 +176,37 @@ def update_profile_status():
                 
                 profile_data[profile["name"]] = clients
             except Exception as e:
+                logger.error(f"Error updating profile {profile['name']}: {e}")
                 # If unable to connect or parse, clear the client list for this profile.
                 if profile["name"] in profile_data and profile_data[profile["name"]]:
                     profile_data[profile["name"]] = []
                     data_changed = True
         
         # Check for disconnected clients
-        disconnected = previous_active_clients - current_active_clients
-        if disconnected:
-            data_changed = True
-            for profile_name, common_name in disconnected:
-                # Find the client in the previous data
-                for client in profile_data.get(profile_name, []):
-                    if client.get("common_name") == common_name:
-                        # Add to connection history
-                        disconnected_at = datetime.datetime.now()
-                        ip = client["real_address"].split(':')[0]
-                        location = get_ip_location(ip)
-                        location_str = f"{location['city']}, {location['country']}"
-                        
-                        connection_history.appendleft({
-                            "common_name": common_name,
-                            "real_address": client["real_address"],
-                            "connected_since": client["connected_since"],
-                            "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
-                            "runtime": client["runtime"],
-                            "location": location_str,
-                            "profile": profile_name
-                        })
-                        break
+        for client_key, client_data in previous_clients_map.items():
+            if client_key not in current_clients_map:
+                profile_name, common_name = client_key
+                logger.info(f"Client disconnected: {common_name} from {profile_name}")
+                
+                # Add to connection history
+                disconnected_at = datetime.datetime.now()
+                
+                history_entry = {
+                    "common_name": client_data["common_name"],
+                    "real_address": client_data["real_address"],
+                    "connected_since": client_data["connected_since"],
+                    "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "runtime": client_data["runtime"],
+                    "location": client_data["location"],
+                    "profile": profile_name
+                }
+                
+                connection_history.appendleft(history_entry)
+                logger.info(f"Added to history: {history_entry}")
+                data_changed = True
         
-        # Update previous active clients for next iteration
-        previous_active_clients = current_active_clients
+        # Update previous clients map for next iteration
+        previous_clients_map = current_clients_map.copy()
         
         # If data has changed, emit update to clients
         if data_changed:
@@ -222,6 +237,15 @@ def kill_client(profile_name, client_name):
     if not profile:
         flash("Profile not found", "error")
         return redirect(url_for("index"))
+    
+    # Find client data before killing
+    client_data = None
+    if profile_name in profile_data:
+        for client in profile_data[profile_name]:
+            if client.get("common_name") == client_name:
+                client_data = client
+                break
+    
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(profile["socket_path"])
@@ -252,6 +276,24 @@ def kill_client(profile_name, client_name):
         
         if "SUCCESS" in response:
             flash(f"Successfully killed connection for {client_name}", "success")
+            
+            # Add to connection history if we found the client data
+            if client_data:
+                disconnected_at = datetime.datetime.now()
+                connection_history.appendleft({
+                    "common_name": client_data["common_name"],
+                    "real_address": client_data["real_address"],
+                    "connected_since": client_data["connected_since"],
+                    "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "runtime": client_data["runtime"],
+                    "location": client_data["location"],
+                    "profile": profile_name
+                })
+                # Also remove this client from the previous_clients_map to prevent duplicate entries
+                client_key = (profile_name, client_name)
+                if client_key in previous_clients_map:
+                    del previous_clients_map[client_key]
+                logger.info(f"Added killed client to history: {client_name}")
         else:
             flash(f"Kill command response: {response}", "info")
     except Exception as e:
