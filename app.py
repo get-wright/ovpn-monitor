@@ -3,9 +3,11 @@ import socket
 import datetime
 import threading
 import time
+from flask_socketio import SocketIO
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
+socketio = SocketIO(app)
 
 # Configuration: list of OpenVPN management interface profiles.
 # Each profile must include a unique name and its corresponding UNIX socket path.
@@ -27,6 +29,7 @@ def update_profile_status():
     sends the "status" command, parses the output, and updates the client list and IP logs.
     """
     while True:
+        data_changed = False
         for profile in profiles_config:
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -46,14 +49,6 @@ def update_profile_status():
                 status_output = data.decode()
                 
                 # Parse status output.
-                # We assume the output format is similar to:
-                #   OpenVPN CLIENT LIST
-                #   Updated,YYYY-MM-DD HH:MM:SS
-                #   Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since
-                #   <client line 1>
-                #   <client line 2>
-                #   ...
-                #   ROUTING TABLE
                 lines = status_output.splitlines()
                 clients = []
                 # Find section boundaries.
@@ -65,6 +60,7 @@ def update_profile_status():
                     if line.startswith("ROUTING TABLE"):
                         end_index = i
                         break
+                
                 # Parse client data if the section was found.
                 if start_index is not None and end_index is not None:
                     # We assume the header line is at start_index+2.
@@ -92,19 +88,37 @@ def update_profile_status():
                             ip = real_address.split(':')[0]
                             if common_name not in profile_ip_log:
                                 profile_ip_log[common_name] = set()
-                            profile_ip_log[common_name].add(ip)
+                                data_changed = True
+                            if ip not in profile_ip_log[common_name]:
+                                profile_ip_log[common_name].add(ip)
+                                data_changed = True
+                
+                # Check if client data has changed
+                old_clients = profile_data.get(profile["name"], [])
+                if len(old_clients) != len(clients) or any(old != new for old, new in zip(old_clients, clients)):
+                    data_changed = True
+                
                 profile_data[profile["name"]] = clients
             except Exception as e:
                 # If unable to connect or parse, clear the client list for this profile.
-                profile_data[profile["name"]] = []
+                if profile["name"] in profile_data and profile_data[profile["name"]]:
+                    profile_data[profile["name"]] = []
+                    data_changed = True
+        
+        # If data has changed, emit update to clients
+        if data_changed:
+            socketio.emit('data_update', {
+                'profile_data': profile_data,
+                'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()}  # Convert sets to lists for JSON
+            })
+        
         time.sleep(5)  # Update every 5 seconds.
-
-# Start the background thread.
-threading.Thread(target=update_profile_status, daemon=True).start()
 
 @app.route('/')
 def index():
-    return render_template('index.html', profile_data=profile_data, profile_ip_log=profile_ip_log)
+    # Convert sets to lists for initial template render
+    ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
+    return render_template('index.html', profile_data=profile_data, profile_ip_log=ip_log_for_template)
 
 @app.route('/kill/<profile_name>/<client_name>', methods=["POST"])
 def kill_client(profile_name, client_name):
@@ -152,5 +166,10 @@ def kill_client(profile_name, client_name):
         flash(f"Error sending kill command: {e}", "error")
     return redirect(url_for("index"))
 
+# Start the background thread.
+def start_background_thread():
+    threading.Thread(target=update_profile_status, daemon=True).start()
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    start_background_thread()
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

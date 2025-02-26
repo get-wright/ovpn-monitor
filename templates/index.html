@@ -1,59 +1,235 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
     <title>OpenVPN Monitor</title>
     <style>
-        table { border-collapse: collapse; width: 80%; }
-        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-        th { background-color: #f2f2f2; }
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .profile {
+            margin-bottom: 30px;
+            border: 1px solid #ccc;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .button {
+            background-color: #f44336;
+            color: white;
+            padding: 5px 10px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .flash {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .flash-success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .flash-error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .flash-info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+        }
+        .ip-history {
+            font-size: 0.85em;
+            color: #666;
+        }
     </style>
+    <!-- Include Socket.IO client library -->
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
 </head>
 <body>
-    <h1>Active OpenVPN Profiles</h1>
+    <h1>OpenVPN Monitor</h1>
+    
+    <!-- Flash messages -->
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        <ul>
-        {% for category, message in messages %}
-          <li><strong>{{ category }}:</strong> {{ message }}</li>
-        {% endfor %}
-        </ul>
-      {% endif %}
-    {% endwith %}
-    {% for profile, clients in profile_data.items() %}
-        <h2>{{ profile }}</h2>
-        <table>
-            <tr>
-                <th>Common Name</th>
-                <th>Runtime</th>
-                <th>IP</th>
-                <th>Actions</th>
-            </tr>
-            {% for client in clients %}
-            <tr>
-                <td>{{ client.common_name }}</td>
-                <td>{{ client.runtime }}</td>
-                <td>{{ client.real_address.split(':')[0] }}</td>
-                <td>
-                    <form action="{{ url_for('kill_client', profile_name=profile, client_name=client.common_name) }}" method="post">
-                        <button type="submit">Kill</button>
-                    </form>
-                </td>
-            </tr>
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash flash-{{ category }}">{{ message }}</div>
             {% endfor %}
-        </table>
-        <h3>IP Log for Profile {{ profile }}:</h3>
-        <ul>
-        {% for client in clients %}
-            <li>
-                <strong>{{ client.common_name }}:</strong>
-                {% if client.common_name in profile_ip_log %}
-                    {{ profile_ip_log[client.common_name] | list }}
-                {% else %}
-                    No IPs logged.
-                {% endif %}
-            </li>
+        {% endif %}
+    {% endwith %}
+    
+    <div id="profiles-container">
+        {% for profile_name, clients in profile_data.items() %}
+        <div class="profile" id="profile-{{ profile_name }}">
+            <h2>{{ profile_name }}</h2>
+            {% if clients %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Common Name</th>
+                        <th>Real Address</th>
+                        <th>Connected Since</th>
+                        <th>Runtime</th>
+                        <th>IP History</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for client in clients %}
+                    <tr>
+                        <td>{{ client.common_name }}</td>
+                        <td>{{ client.real_address }}</td>
+                        <td>{{ client.connected_since }}</td>
+                        <td class="runtime-cell">{{ client.runtime }}</td>
+                        <td class="ip-history">
+                            {% if client.common_name in profile_ip_log %}
+                                {{ profile_ip_log[client.common_name]|join(", ") }}
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="POST" action="{{ url_for('kill_client', profile_name=profile_name, client_name=client.common_name) }}">
+                                <button type="submit" class="button">Kill</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>No active clients for this profile.</p>
+            {% endif %}
+        </div>
         {% endfor %}
-        </ul>
-    {% endfor %}
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Connect to the Socket.IO server
+            const socket = io();
+            
+            // Handle the data_update event
+            socket.on('data_update', function(data) {
+                updateProfiles(data.profile_data, data.profile_ip_log);
+            });
+            
+            // Function to update the profile data in the DOM
+            function updateProfiles(profileData, profileIpLog) {
+                const container = document.getElementById('profiles-container');
+                
+                // Clear existing content
+                container.innerHTML = '';
+                
+                // Rebuild the profiles
+                for (const [profileName, clients] of Object.entries(profileData)) {
+                    const profileDiv = document.createElement('div');
+                    profileDiv.className = 'profile';
+                    profileDiv.id = `profile-${profileName}`;
+                    
+                    const title = document.createElement('h2');
+                    title.textContent = profileName;
+                    profileDiv.appendChild(title);
+                    
+                    if (clients && clients.length > 0) {
+                        const table = document.createElement('table');
+                        
+                        // Create table header
+                        const thead = document.createElement('thead');
+                        const headerRow = document.createElement('tr');
+                        
+                        const headers = ['Common Name', 'Real Address', 'Connected Since', 'Runtime', 'IP History', 'Actions'];
+                        headers.forEach(headerText => {
+                            const th = document.createElement('th');
+                            th.textContent = headerText;
+                            headerRow.appendChild(th);
+                        });
+                        
+                        thead.appendChild(headerRow);
+                        table.appendChild(thead);
+                        
+                        // Create table body
+                        const tbody = document.createElement('tbody');
+                        
+                        clients.forEach(client => {
+                            const row = document.createElement('tr');
+                            
+                            // Common name cell
+                            const nameCell = document.createElement('td');
+                            nameCell.textContent = client.common_name;
+                            row.appendChild(nameCell);
+                            
+                            // Real address cell
+                            const addressCell = document.createElement('td');
+                            addressCell.textContent = client.real_address;
+                            row.appendChild(addressCell);
+                            
+                            // Connected since cell
+                            const connectedCell = document.createElement('td');
+                            connectedCell.textContent = client.connected_since;
+                            row.appendChild(connectedCell);
+                            
+                            // Runtime cell
+                            const runtimeCell = document.createElement('td');
+                            runtimeCell.className = 'runtime-cell';
+                            runtimeCell.textContent = client.runtime;
+                            row.appendChild(runtimeCell);
+                            
+                            // IP history cell
+                            const ipHistoryCell = document.createElement('td');
+                            ipHistoryCell.className = 'ip-history';
+                            if (profileIpLog[client.common_name]) {
+                                ipHistoryCell.textContent = profileIpLog[client.common_name].join(', ');
+                            }
+                            row.appendChild(ipHistoryCell);
+                            
+                            // Actions cell
+                            const actionsCell = document.createElement('td');
+                            const form = document.createElement('form');
+                            form.method = 'POST';
+                            form.action = `/kill/${profileName}/${client.common_name}`;
+                            
+                            const button = document.createElement('button');
+                            button.type = 'submit';
+                            button.className = 'button';
+                            button.textContent = 'Kill';
+                            
+                            form.appendChild(button);
+                            actionsCell.appendChild(form);
+                            row.appendChild(actionsCell);
+                            
+                            tbody.appendChild(row);
+                        });
+                        
+                        table.appendChild(tbody);
+                        profileDiv.appendChild(table);
+                    } else {
+                        const noClients = document.createElement('p');
+                        noClients.textContent = 'No active clients for this profile.';
+                        profileDiv.appendChild(noClients);
+                    }
+                    
+                    container.appendChild(profileDiv);
+                }
+            }
+        });
+    </script>
 </body>
 </html>
