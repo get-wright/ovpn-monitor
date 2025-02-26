@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container">
+    <h1>IP Log for {{ profile_name }}</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>IP Address</th>
+                <th>Timestamp</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for log in ip_logs %}
+            <tr>
+                <td>{{ log.ip_address }}</td>
+                <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            </tr>
+            {% endfor %}
+            {% if ip_logs|length == 0 %}
+            <tr>
+                <td colspan="2" style="text-align: center;">No IP logs found</td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+    <a href="{{ url_for('routes.index') }}" class="back-button">Back to Active Profiles</a>
+</div>
+{% endblock %}

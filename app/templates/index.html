@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container">
+    <h1>Active OpenVPN Profiles</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Runtime</th>
+                <th>IP Address</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for profile in profiles %}
+            <tr>
+                <td>{{ profile.name }}</td>
+                <td>{{ profile.runtime }}</td>
+                <td>{{ profile.ip }}</td>
+                <td>
+                    <button class="kill-profile" data-profile-id="{{ profile.id }}">Kill</button>
+                    <a href="{{ url_for('routes.view_ip_log', profile_id=profile.id) }}">View IP Log</a>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if profiles|length == 0 %}
+            <tr>
+                <td colspan="4" style="text-align: center;">No active profiles found</td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
