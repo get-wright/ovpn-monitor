@@ -14,7 +14,7 @@ import os
 import pytz
 
 app = Flask(__name__)
-app.secret_key = 'secret!'
+app.secret_key = os.urandom(32)
 
 # Database configuration
 db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ovpn_monitor.db')
