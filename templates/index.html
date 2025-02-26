@@ -1,3 +1,4 @@
+<!-- filepath: templates/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -124,6 +125,52 @@
         ::-webkit-scrollbar-thumb:hover {
             background: #2980b9;
         }
+        
+        /* Style for the tabs */
+        .nav-tabs .nav-link {
+            color: #3498db;
+            border: 1px solid transparent;
+            border-top-left-radius: .25rem;
+            border-top-right-radius: .25rem;
+            padding: 10px 20px;
+            font-weight: 600;
+        }
+        
+        .nav-tabs .nav-link.active {
+            color: #2c3e50;
+            background-color: #fff;
+            border-color: #dee2e6 #dee2e6 #fff;
+        }
+        
+        .history-card {
+            background-color: white;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .history-card h2 {
+            font-size: 1.5rem;
+            color: #2c3e50;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #9b59b6;
+            padding-bottom: 10px;
+        }
+        
+        .table-history thead th {
+            background-color: #9b59b6;
+        }
+        
+        .location-badge {
+            background-color: #f0f0f0;
+            color: #555;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            display: inline-block;
+            margin-top: 3px;
+        }
     </style>
 </head>
 <body>
@@ -141,51 +188,107 @@
             {% endif %}
         {% endwith %}
 
-        <!-- Profiles -->
-        <div id="profiles-container">
-            {% for profile_name, clients in profile_data.items() %}
-            <div class="profile-card" id="profile-{{ profile_name }}">
-                <h2>{{ profile_name }}</h2>
-                {% if clients %}
-                <div class="table-responsive">
-                    <table class="table table-striped align-middle">
-                        <thead>
-                            <tr>
-                                <th>Common Name</th>
-                                <th>Real Address</th>
-                                <th>Connected Since</th>
-                                <th>Runtime</th>
-                                <th>IP History</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for client in clients %}
-                            <tr>
-                                <td>{{ client.common_name }}</td>
-                                <td>{{ client.real_address }}</td>
-                                <td data-connected-time="{{ client.connected_since }}">{{ client.connected_since }}</td>
-                                <td class="runtime-cell" data-common-name="{{ client.common_name }}">{{ client.runtime }}</td>
-                                <td class="ip-history">
-                                    {% if client.common_name in profile_ip_log %}
-                                        {{ profile_ip_log[client.common_name]|join(", ") }}
-                                    {% endif %}
-                                </td>
-                                <td>
-                                    <form method="POST" action="{{ url_for('kill_client', profile_name=profile_name, client_name=client.common_name) }}">
-                                        <button type="submit" class="btn btn-kill">Kill</button>
-                                    </form>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+        <!-- Navigation tabs -->
+        <ul class="nav nav-tabs mb-4" id="monitorTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="active-tab" data-bs-toggle="tab" data-bs-target="#active" type="button" role="tab" aria-controls="active" aria-selected="true">Active Connections</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="history-tab" data-bs-toggle="tab" data-bs-target="#history" type="button" role="tab" aria-controls="history" aria-selected="false">Connection History</button>
+            </li>
+        </ul>
+
+        <!-- Tab content -->
+        <div class="tab-content" id="monitorTabsContent">
+            <!-- Active Connections Tab -->
+            <div class="tab-pane fade show active" id="active" role="tabpanel" aria-labelledby="active-tab">
+                <!-- Profiles -->
+                <div id="profiles-container">
+                    {% for profile_name, clients in profile_data.items() %}
+                    <div class="profile-card" id="profile-{{ profile_name }}">
+                        <h2>{{ profile_name }}</h2>
+                        {% if clients %}
+                        <div class="table-responsive">
+                            <table class="table table-striped align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Common Name</th>
+                                        <th>Real Address</th>
+                                        <th>Location</th>
+                                        <th>Connected Since</th>
+                                        <th>Runtime</th>
+                                        <th>IP History</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for client in clients %}
+                                    <tr>
+                                        <td>{{ client.common_name }}</td>
+                                        <td>{{ client.real_address }}</td>
+                                        <td>{{ client.location }}</td>
+                                        <td data-connected-time="{{ client.connected_since }}">{{ client.connected_since }}</td>
+                                        <td class="runtime-cell" data-common-name="{{ client.common_name }}">{{ client.runtime }}</td>
+                                        <td class="ip-history">
+                                            {% if client.common_name in profile_ip_log %}
+                                                {{ profile_ip_log[client.common_name]|join(", ") }}
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            <form method="POST" action="{{ url_for('kill_client', profile_name=profile_name, client_name=client.common_name) }}">
+                                                <button type="submit" class="btn btn-kill">Kill</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <p class="text-muted">No active clients for this profile.</p>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
                 </div>
-                {% else %}
-                <p class="text-muted">No active clients for this profile.</p>
-                {% endif %}
             </div>
-            {% endfor %}
+            
+            <!-- Connection History Tab -->
+            <div class="tab-pane fade" id="history" role="tabpanel" aria-labelledby="history-tab">
+                <div class="history-card">
+                    <h2>Recent Connections</h2>
+                    <div class="table-responsive">
+                        <table class="table table-striped table-history align-middle" id="history-table">
+                            <thead>
+                                <tr>
+                                    <th>Profile</th>
+                                    <th>Common Name</th>
+                                    <th>Real Address</th>
+                                    <th>Location</th>
+                                    <th>Connected</th>
+                                    <th>Disconnected</th>
+                                    <th>Duration</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-table-body">
+                                {% for entry in connection_history %}
+                                <tr>
+                                    <td>{{ entry.profile }}</td>
+                                    <td>{{ entry.common_name }}</td>
+                                    <td>{{ entry.real_address }}</td>
+                                    <td>{{ entry.location }}</td>
+                                    <td>{{ entry.connected_since }}</td>
+                                    <td>{{ entry.disconnected_at }}</td>
+                                    <td>{{ entry.runtime }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% if not connection_history %}
+                    <p class="text-muted">No connection history yet.</p>
+                    {% endif %}
+                </div>
+            </div>
         </div>
     </div>
 
@@ -199,6 +302,7 @@
 
             socket.on('data_update', function(data) {
                 updateProfiles(data.profile_data, data.profile_ip_log);
+                updateConnectionHistory(data.connection_history);
                 initializeRuntimeUpdates();
             });
 
@@ -224,7 +328,7 @@
 
                         const thead = document.createElement('thead');
                         const headerRow = document.createElement('tr');
-                        ['Common Name', 'Real Address', 'Connected Since', 'Runtime', 'IP History', 'Actions'].forEach(text => {
+                        ['Common Name', 'Real Address', 'Location', 'Connected Since', 'Runtime', 'IP History', 'Actions'].forEach(text => {
                             const th = document.createElement('th');
                             th.textContent = text;
                             headerRow.appendChild(th);
@@ -239,6 +343,7 @@
                             row.innerHTML = `
                                 <td>${client.common_name}</td>
                                 <td>${client.real_address}</td>
+                                <td>${client.location || 'Unknown'}</td>
                                 <td data-connected-time="${client.connected_since}">${client.connected_since}</td>
                                 <td class="runtime-cell" data-common-name="${client.common_name}">${client.runtime}</td>
                                 <td class="ip-history">${profileIpLog[client.common_name] ? profileIpLog[client.common_name].join(', ') : ''}</td>
@@ -262,6 +367,34 @@
                     }
 
                     container.appendChild(profileDiv);
+                }
+            }
+            
+            function updateConnectionHistory(history) {
+                const tbody = document.getElementById('history-table-body');
+                tbody.innerHTML = '';
+                
+                if (history && history.length > 0) {
+                    document.getElementById('history-table').style.display = 'table';
+                    history.forEach(entry => {
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td>${entry.profile}</td>
+                            <td>${entry.common_name}</td>
+                            <td>${entry.real_address}</td>
+                            <td>${entry.location}</td>
+                            <td>${entry.connected_since}</td>
+                            <td>${entry.disconnected_at}</td>
+                            <td>${entry.runtime}</td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                } else {
+                    document.getElementById('history-table').style.display = 'none';
+                    const noHistory = document.createElement('p');
+                    noHistory.className = 'text-muted';
+                    noHistory.textContent = 'No connection history yet.';
+                    tbody.parentElement.parentElement.appendChild(noHistory);
                 }
             }
 

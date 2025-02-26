@@ -4,6 +4,9 @@ import datetime
 import threading
 import time
 from flask_socketio import SocketIO
+import requests
+import json
+from collections import deque
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
@@ -23,13 +26,56 @@ profiles_config = [
 profile_data = {}     # { profile_name: [ { "common_name": ..., "runtime": ..., "real_address": ..., "connected_since": ... }, ... ] }
 profile_ip_log = {}   # { common_name: set([ip1, ip2, ...]) }
 
+# Connection history (limited to the most recent 100 entries)
+# Contains disconnected clients with their information
+connection_history = deque(maxlen=100)  # [{common_name, real_address, location, connected_since, disconnected_at, runtime}]
+
+# Cache for IP geolocation data
+ip_location_cache = {}  # {ip: {country: ..., city: ...}}
+
+def get_ip_location(ip):
+    """
+    Get location information for an IP address using a free geolocation API.
+    Caches results to avoid repeated API calls for the same IP.
+    """
+    # Return cached result if available
+    if ip in ip_location_cache:
+        return ip_location_cache[ip]
+    
+    try:
+        # Use ip-api.com which is free and doesn't require API key
+        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                location = {
+                    "country": data.get("country", "Unknown"),
+                    "city": data.get("city", "Unknown"),
+                    "region": data.get("regionName", "")
+                }
+                # Cache the result
+                ip_location_cache[ip] = location
+                return location
+    except Exception as e:
+        print(f"Error getting location for IP {ip}: {e}")
+    
+    # Return default if API call fails
+    default = {"country": "Unknown", "city": "Unknown", "region": ""}
+    ip_location_cache[ip] = default
+    return default
+
 def update_profile_status():
     """
     Background thread function that periodically connects to each OpenVPN management interface,
     sends the "status" command, parses the output, and updates the client list and IP logs.
     """
+    # Keep track of active clients to detect disconnections
+    previous_active_clients = set()  # {(profile_name, common_name)}
+    
     while True:
         data_changed = False
+        current_active_clients = set()  # Track currently active clients
+        
         for profile in profiles_config:
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -73,19 +119,33 @@ def update_profile_status():
                             common_name = parts[0].strip()
                             real_address = parts[1].strip()
                             connected_since = parts[4].strip()
+                            
+                            # Add to set of active clients
+                            client_key = (profile["name"], common_name)
+                            current_active_clients.add(client_key)
+                            
                             try:
                                 conn_time = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
                                 runtime = str(datetime.datetime.now() - conn_time).split('.')[0]
                             except Exception as ex:
                                 runtime = "N/A"
+                                
+                            # Extract the IP part (before the colon)
+                            ip = real_address.split(':')[0]
+                            
+                            # Get location information for the IP
+                            location = get_ip_location(ip)
+                            location_str = f"{location['city']}, {location['country']}"
+                            
                             clients.append({
                                 "common_name": common_name,
                                 "real_address": real_address,
                                 "connected_since": connected_since,
-                                "runtime": runtime
+                                "runtime": runtime,
+                                "location": location_str
                             })
-                            # Extract the IP part (before the colon) and update the IP log.
-                            ip = real_address.split(':')[0]
+                            
+                            # Update the IP log
                             if common_name not in profile_ip_log:
                                 profile_ip_log[common_name] = set()
                                 data_changed = True
@@ -105,11 +165,40 @@ def update_profile_status():
                     profile_data[profile["name"]] = []
                     data_changed = True
         
+        # Check for disconnected clients
+        disconnected = previous_active_clients - current_active_clients
+        if disconnected:
+            data_changed = True
+            for profile_name, common_name in disconnected:
+                # Find the client in the previous data
+                for client in profile_data.get(profile_name, []):
+                    if client.get("common_name") == common_name:
+                        # Add to connection history
+                        disconnected_at = datetime.datetime.now()
+                        ip = client["real_address"].split(':')[0]
+                        location = get_ip_location(ip)
+                        location_str = f"{location['city']}, {location['country']}"
+                        
+                        connection_history.appendleft({
+                            "common_name": common_name,
+                            "real_address": client["real_address"],
+                            "connected_since": client["connected_since"],
+                            "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            "runtime": client["runtime"],
+                            "location": location_str,
+                            "profile": profile_name
+                        })
+                        break
+        
+        # Update previous active clients for next iteration
+        previous_active_clients = current_active_clients
+        
         # If data has changed, emit update to clients
         if data_changed:
             socketio.emit('data_update', {
                 'profile_data': profile_data,
-                'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()}  # Convert sets to lists for JSON
+                'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},  # Convert sets to lists for JSON
+                'connection_history': list(connection_history)  # Convert deque to list for JSON
             })
         
         time.sleep(5)  # Update every 5 seconds.
@@ -118,7 +207,10 @@ def update_profile_status():
 def index():
     # Convert sets to lists for initial template render
     ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
-    return render_template('index.html', profile_data=profile_data, profile_ip_log=ip_log_for_template)
+    return render_template('index.html', 
+                           profile_data=profile_data, 
+                           profile_ip_log=ip_log_for_template,
+                           connection_history=list(connection_history))
 
 @app.route('/kill/<profile_name>/<client_name>', methods=["POST"])
 def kill_client(profile_name, client_name):
