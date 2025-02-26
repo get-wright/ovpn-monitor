@@ -34,7 +34,7 @@
                 <td>{{ client.runtime }}</td>
                 <td>{{ client.real_address.split(':')[0] }}</td>
                 <td>
-                    <form action="/kill/{{ profile }}/{{ client.common_name }}" method="post">
+                    <form action="{{ url_for('kill_client', profile_name=profile, client_name=client.common_name) }}" method="post">
                         <button type="submit">Kill</button>
                     </form>
                 </td>
