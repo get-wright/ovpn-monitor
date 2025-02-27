@@ -14,6 +14,11 @@ import os
 from maxminddb import open_database
 from flask_httpauth import HTTPBasicAuth
 from dotenv import load_dotenv
+import datetime
+import pytz  # We'll need to add this to requirements.txt
+
+# Add this constant at the top of your file with other globals
+TIMEZONE = pytz.timezone('Asia/Bangkok')  # UTC+7 (Bangkok timezone)
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
@@ -75,13 +80,17 @@ class ConnectionHistory(db.Model):
     lon = db.Column(db.Float)  # New field for longitude
 
 def to_dict(self):
+    # Convert UTC times to the target timezone
+    connected_since_local = self.connected_since.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
+    disconnected_at_local = self.disconnected_at.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
+    
     result = {
         "profile": self.profile,
         "common_name": self.common_name,
         "real_address": self.real_address,
         "location": self.location,
-        "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
-        "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "connected_since": connected_since_local.strftime("%Y-%m-%d %H:%M:%S"),
+        "disconnected_at": disconnected_at_local.strftime("%Y-%m-%d %H:%M:%S"),
         "runtime": self.runtime,
         "lat": self.lat,
         "lon": self.lon
@@ -182,11 +191,16 @@ def get_ip_location(ip):
 
 def add_to_connection_history(profile_name, client_data, disconnect_type="client-side"):
     try:
-        disconnected_at = datetime.datetime.now()
-        connected_since = datetime.datetime.strptime(
+        disconnected_at = datetime.datetime.now(TIMEZONE)
+        
+        # Parse the connected_since string with timezone awareness
+        connected_since_naive = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
+        # Assume the connected_since was in UTC+7 if not specified
+        connected_since = TIMEZONE.localize(connected_since_naive)
+        
         location_dict = get_ip_location(client_data["real_address"])
         location_str = f"{location_dict['city']}, {location_dict['country']}"
         lat = location_dict["lat"]
@@ -198,8 +212,8 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
                 location=location_str,
-                connected_since=connected_since,
-                disconnected_at=disconnected_at,
+                connected_since=connected_since.astimezone(pytz.UTC),  # Store in UTC in database
+                disconnected_at=disconnected_at.astimezone(pytz.UTC),  # Store in UTC in database
                 runtime=client_data["runtime"],
                 disconnect_type=disconnect_type,
                 lat=lat,
@@ -287,8 +301,11 @@ def update_profile_status():
                                 connected_since = parts[4].strip()
                                 
                                 try:
-                                    conn_time = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
-                                    runtime = str(datetime.datetime.now() - conn_time).split('.')[0]
+                                    # Parse the time in the timezone context
+                                    conn_time_naive = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
+                                    conn_time = TIMEZONE.localize(conn_time_naive)
+                                    now = datetime.datetime.now(TIMEZONE)
+                                    runtime = str(now - conn_time).split('.')[0]
                                 except Exception as ex:
                                     logger.error(f"Error parsing connection time: {ex}")
                                     runtime = "N/A"

@@ -794,6 +794,8 @@
 
             function updateRuntimes() {
                 const runtimeCells = document.querySelectorAll('.runtime-cell');
+                const timezone = 'Asia/Bangkok'; // UTC+7
+                
                 runtimeCells.forEach(cell => {
                     const connectedCell = cell.previousElementSibling;
                     if (connectedCell && connectedCell.hasAttribute('data-connected-time')) {
@@ -803,6 +805,8 @@
                             if (parts.length === 2) {
                                 const dateParts = parts[0].split('-');
                                 const timeParts = parts[1].split(':');
+                                
+                                // Create date objects with timezone consideration
                                 const connTime = new Date(
                                     parseInt(dateParts[0]),
                                     parseInt(dateParts[1]) - 1,
@@ -811,11 +815,15 @@
                                     parseInt(timeParts[1]),
                                     parseInt(timeParts[2])
                                 );
+                                
+                                // Assume the displayed time is already in UTC+7
                                 const now = new Date();
                                 const diffSec = Math.floor((now - connTime) / 1000);
+                                
                                 const hours = Math.floor(diffSec / 3600);
                                 const minutes = Math.floor((diffSec % 3600) / 60);
                                 const seconds = diffSec % 60;
+                                
                                 cell.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
                             }
                         } catch (e) {
@@ -824,6 +832,7 @@
                     }
                 });
             }
+            
             function initializeRuntimeUpdates() {
                 updateRuntimes();
             }
