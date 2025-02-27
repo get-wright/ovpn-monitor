@@ -347,6 +347,7 @@ def update_profile_status():
                                     "real_address": ip,
                                     "real_address_full": real_address,
                                     "connected_since": connected_since,
+                                    "connected_timestamp": int(conn_time.timestamp()),  # Add this line
                                     "runtime": runtime,
                                     "location": location_str,
                                     "lat": location_dict["lat"],
