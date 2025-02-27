@@ -797,21 +797,31 @@
                 
                 runtimeCells.forEach(cell => {
                     const connectedCell = cell.previousElementSibling;
-                    if (connectedCell && connectedCell.hasAttribute('data-connected-timestamp')) {
+                    if (connectedCell && connectedCell.hasAttribute('data-connected-time')) {
+                        const connectedTime = connectedCell.getAttribute('data-connected-time');
                         try {
-                            const timestamp = parseInt(connectedCell.getAttribute('data-connected-timestamp'));
-                            const connDate = new Date(timestamp * 1000); // Convert seconds to milliseconds
-                            const now = new Date();
-                            
-                            // Calculate difference in seconds
-                            const diffSec = Math.floor((now - connDate) / 1000);
-                            
-                            // Format runtime
-                            const hours_display = Math.floor(diffSec / 3600);
-                            const minutes_display = Math.floor((diffSec % 3600) / 60);
-                            const seconds_display = diffSec % 60;
-                            
-                            cell.textContent = `${hours_display.toString().padStart(2, '0')}:${minutes_display.toString().padStart(2, '0')}:${seconds_display.toString().padStart(2, '0')}`;
+                            const parts = connectedTime.split(' ');
+                            if (parts.length === 2) {
+                                const dateParts = parts[0].split('-');
+                                const timeParts = parts[1].split(':');
+                                
+                                // Create a date with explicit timezone offset for Bangkok (+7 hours)
+                                const connDateStr = `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}T${timeParts[0]}:${timeParts[1]}:${timeParts[2]}+07:00`;
+                                const connDate = new Date(connDateStr);
+                                
+                                // Get current time
+                                const now = new Date();
+                                
+                                // Calculate difference in seconds
+                                const diffSec = Math.floor((now - connDate) / 1000);
+                                
+                                // Format runtime
+                                const hours_display = Math.floor(diffSec / 3600);
+                                const minutes_display = Math.floor((diffSec % 3600) / 60);
+                                const seconds_display = diffSec % 60;
+                                
+                                cell.textContent = `${hours_display.toString().padStart(2, '0')}:${minutes_display.toString().padStart(2, '0')}:${seconds_display.toString().padStart(2, '0')}`;
+                            }
                         } catch (e) {
                             console.error('Error updating runtime:', e);
                         }
