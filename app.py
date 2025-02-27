@@ -258,13 +258,56 @@ def update_profile_status():
             data_changed = False
             current_clients_map = {}  # Track currently active clients with their data
             
+            logger.info(f"Updating profiles ({len(profiles_config)} profiles defined)")
+            
             for profile in profiles_config:
                 try:
-                    # ... existing connection code ...
+                    logger.debug(f"Connecting to profile {profile['name']} via {profile['socket_path']}")
+                    # Connect to the OpenVPN management socket
+                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    s.settimeout(2)  # Set timeout to avoid hanging
+                    s.connect(profile["socket_path"])
                     
-                    # Parse client data if the section was found.
+                    # Read welcome message
+                    s.recv(4096)
+                    
+                    # Send status command
+                    s.sendall(b"status\n")
+                    
+                    # Read full response
+                    data = b""
+                    while True:
+                        try:
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                break
+                            data += chunk
+                            if b"END" in data:
+                                break
+                        except socket.timeout:
+                            break
+                    
+                    s.close()
+                    
+                    # Process the response to extract client data
+                    response = data.decode('utf-8', errors='ignore')
+                    lines = response.splitlines()
+                    
+                    # Find the client list section
+                    start_index = None
+                    end_index = None
+                    for i, line in enumerate(lines):
+                        if line.startswith("Common Name,Real Address"):
+                            start_index = i
+                        elif start_index is not None and line.startswith("ROUTING TABLE"):
+                            end_index = i
+                            break
+                    
+                    # Parse client data if the section was found
+                    clients = []
+                    
                     if start_index is not None and end_index is not None:
-                        for line in lines[start_index+3:end_index]:
+                        for line in lines[start_index+1:end_index]:
                             if not line.strip():
                                 continue
                             parts = line.split(',')
@@ -323,6 +366,19 @@ def update_profile_status():
                                 if ip not in profile_ip_log[common_name]:
                                     profile_ip_log[common_name].add(ip)
                                     data_changed = True
+                    
+                    # Check if client data has changed
+                    old_clients = profile_data.get(profile["name"], [])
+                    if len(old_clients) != len(clients) or any(old != new for old, new in zip(old_clients, clients)):
+                        data_changed = True
+                    
+                    profile_data[profile["name"]] = clients
+                except Exception as e:
+                    logger.error(f"Error updating profile {profile['name']}: {e}")
+                    # If unable to connect or parse, clear the client list for this profile.
+                    if profile["name"] in profile_data and profile_data[profile["name"]]:
+                        profile_data[profile["name"]] = []
+                        data_changed = True
                     
                     # Check if client data has changed
                     old_clients = profile_data.get(profile["name"], [])
@@ -484,6 +540,24 @@ def kill_client(profile_name, client_name):
     except Exception as e:
         flash(f"Error sending kill command: {e}", "error")
     return redirect(url_for("index"))
+
+@app.route('/debug')
+@auth.login_required
+def debug_info():
+    # Create a debug information dictionary
+    debug_info = {
+        'timezone': str(TIMEZONE),
+        'server_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'timezone_time': datetime.datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S'),
+        'profiles_config': profiles_config,
+        'active_profiles': list(profile_data.keys()),
+        'active_clients_count': sum(len(clients) for clients in profile_data.values()),
+        'connection_history_count': len(connection_history),
+        'database_path': db_path
+    }
+    
+    # Return as JSON
+    return json.dumps(debug_info, indent=4)
 
 # Start the background thread.
 def start_background_thread():
