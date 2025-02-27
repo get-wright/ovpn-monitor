@@ -356,6 +356,7 @@
             let connectionHistory = [];
             let currentSearchTerm = '';
 
+// Replace the existing tab event listeners
             document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(tab => {
                 tab.addEventListener('shown.bs.tab', function(e) {
                     if (window.ovpnMaps) {
@@ -363,9 +364,14 @@
                         window.ovpnMaps.mapActive.invalidateSize();
                         window.ovpnMaps.mapHistory.invalidateSize();
                         
-                        // Re-apply data
+                        // Re-apply data with current search filter
                         if (e.target.id === 'active-tab') {
-                            updateActiveMap();
+                            // If we have a search term active, update with search filtering
+                            if (currentSearchTerm) {
+                                performSearch(currentSearchTerm);
+                            } else {
+                                updateActiveMap();
+                            }
                         } else if (e.target.id === 'history-tab') {
                             updateHistoryMap(currentSearchTerm ? filterHistory(currentSearchTerm) : connectionHistory);
                         }
@@ -770,9 +776,15 @@
                 const activeTab = document.getElementById('active');
                 const profileCards = activeTab.querySelectorAll('.profile-card');
                 
+                // Track visible clients for map updates
+                let visibleClients = [];
+                
                 profileCards.forEach(profileCard => {
                     const table = profileCard.querySelector('table');
                     if (!table) return; // Skip if no table (no clients)
+                    
+                    // Get profile name for map data
+                    const profileName = profileCard.querySelector('h2').textContent;
                     
                     // Get all rows in the table
                     const rows = table.querySelectorAll('tbody tr');
@@ -783,6 +795,18 @@
                         if (searchTerm === '' || text.includes(searchTerm.toLowerCase())) {
                             row.style.display = '';
                             visibleCount++;
+                            
+                            // Collect client data for map update
+                            if (profileData[profileName]) {
+                                const commonName = row.querySelector('td:first-child').textContent;
+                                const client = profileData[profileName].find(c => c.common_name === commonName);
+                                if (client) {
+                                    visibleClients.push({
+                                        ...client,
+                                        profile: profileName
+                                    });
+                                }
+                            }
                         } else {
                             row.style.display = 'none';
                         }
@@ -807,6 +831,12 @@
                         table.style.display = '';
                     }
                 });
+                
+                // Update active map to show only visible clients
+                if (window.ovpnMaps && window.ovpnMaps.mapActive) {
+                    // Update map markers for visible clients
+                    updateActiveMapFiltered(visibleClients);
+                }
                 
                 // Search in history tab
                 const historyTab = document.getElementById('history');
@@ -879,6 +909,32 @@
                     }
                 }
             }
+            
+            // Add new function to update active map with filtered clients
+            function updateActiveMapFiltered(visibleClients) {
+                if (!window.ovpnMaps) return;
+                
+                const { mapActive, activeMarkers } = window.ovpnMaps;
+                activeMarkers.clearLayers();
+                
+                let hasValidMarkers = false;
+                
+                visibleClients.forEach(client => {
+                    if (client.lat && client.lon) {
+                        const marker = L.marker([client.lat, client.lon]).bindTooltip(
+                            `${client.common_name} (${client.profile})`
+                        );
+                        activeMarkers.addLayer(marker);
+                        hasValidMarkers = true;
+                    }
+                });
+                
+                if (hasValidMarkers) {
+                    mapActive.fitBounds(activeMarkers.getBounds(), { padding: [50, 50] });
+                } else {
+                    mapActive.setView([0, 0], 2);
+                }
+            }
 
             // Socket event handler for data updates
             socket.on('data_update', function(data) {
@@ -893,14 +949,13 @@
                 updateConnectionHistory(connectionHistory);
                 initializeRuntimeUpdates();
                 
-                // Update the maps
+                // Update the maps with respect to any active search filter
                 if (window.ovpnMaps) {
-                    updateActiveMap();
-                    
-                    // If we have a search term, apply it to filter history
+                    // If we have a search term, re-apply the search to filter the new data
                     if (currentSearchTerm) {
                         performSearch(currentSearchTerm);
                     } else {
+                        updateActiveMap();
                         updateHistoryMap(connectionHistory);
                     }
                 }
