@@ -805,6 +805,7 @@
                                 const dateParts = parts[0].split('-');
                                 const timeParts = parts[1].split(':');
                                 
+
                                 // Create a date with explicit timezone offset for Bangkok (+7 hours)
                                 const connDateStr = `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}T${timeParts[0]}:${timeParts[1]}:${timeParts[2]}+07:00`;
                                 const connDate = new Date(connDateStr);
@@ -1000,44 +1001,18 @@
                     mapActive.setView([0, 0], 2);
                 }
             }
-
-            // Socket event handler for data updates
-            socket.on('data_update', function(data) {
-                if (!data) return;
-                
-                profileData = data.profile_data || {};
-                profileIpLog = data.profile_ip_log || {};
-                connectionHistory = data.connection_history || [];
-                
-                // Update UI with new data
-                updateProfiles(profileData, profileIpLog);
-                updateConnectionHistory(connectionHistory);
-                initializeRuntimeUpdates();
-                
-                // Update the maps with respect to any active search filter
-                if (window.ovpnMaps) {
-                    // If we have a search term, re-apply the search to filter the new data
-                    if (currentSearchTerm) {
-                        performSearch(currentSearchTerm);
-                    } else {
-                        updateActiveMap();
-                        updateHistoryMap(connectionHistory);
-                    }
-                }
-            });
-
+            
             // Set up search functionality
             document.getElementById('searchInput').addEventListener('input', function() {
                 currentSearchTerm = this.value.toLowerCase().trim();
                 performSearch(currentSearchTerm);
             });
-            
+
             document.getElementById('clearSearch').addEventListener('click', function() {
                 document.getElementById('searchInput').value = '';
                 currentSearchTerm = '';
                 performSearch('');
             });
-
             // Initialize runtime updates
             setInterval(updateRuntimes, 1000);
             initializeRuntimeUpdates();
