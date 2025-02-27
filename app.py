@@ -27,13 +27,17 @@ import os
 from maxminddb import open_database
 from flask_httpauth import HTTPBasicAuth
 from dotenv import load_dotenv
+<<<<<<< Updated upstream
 
 # Load environment variables from .env file
 load_dotenv()
+=======
+>>>>>>> Stashed changes
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
 
+<<<<<<< Updated upstream
 # Authentication setup
 auth = HTTPBasicAuth()
 
@@ -41,6 +45,11 @@ auth = HTTPBasicAuth()
 USERNAME = os.getenv('FLASK_USERNAME')
 PASSWORD = os.getenv('FLASK_PASSWORD')
 
+=======
+auth = HTTPBasicAuth()
+USERNAME = os.getenv('FLASK_USERNAME')
+PASSWORD = os.getenv('FLASK_PASSWORD')
+>>>>>>> Stashed changes
 @auth.verify_password
 def verify_password(username, password):
     if username == USERNAME and password == PASSWORD:
