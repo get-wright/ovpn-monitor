@@ -343,62 +343,274 @@
     <!-- JavaScript for real-time updates -->
     <script>
         document.addEventListener('DOMContentLoaded', function() {
+            // Initialize socket connection
+            console.log("Leaflet loaded?", typeof L !== 'undefined');
+            if (typeof L !== 'undefined') {
+                console.log("Leaflet version:", L.version);
+            } else {
+                console.error("CRITICAL: Leaflet library not loaded. Maps will not work!");
+            }
             const socket = io();
-            const mapActive = L.map('map-active').setView([0, 0], 2);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            }).addTo(mapActive);
-            const mapHistory = L.map('map-history').setView([0, 0], 2);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            }).addTo(mapHistory);
-            const activeMarkers = L.featureGroup().addTo(mapActive);
-            const historyMarkers = L.featureGroup().addTo(mapHistory);
-            let profileData, profileIpLog, connectionHistory, currentSearchTerm = '';
+            let profileData = {};
+            let profileIpLog = {};
+            let connectionHistory = [];
+            let currentSearchTerm = '';
+
+            document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(tab => {
+                tab.addEventListener('shown.bs.tab', function(e) {
+                    if (window.ovpnMaps) {
+                        console.log("Tab changed, redrawing maps");
+                        window.ovpnMaps.mapActive.invalidateSize();
+                        window.ovpnMaps.mapHistory.invalidateSize();
+                        
+                        // Re-apply data
+                        if (e.target.id === 'active-tab') {
+                            updateActiveMap();
+                        } else if (e.target.id === 'history-tab') {
+                            updateHistoryMap(currentSearchTerm ? filterHistory(currentSearchTerm) : connectionHistory);
+                        }
+                    }
+                });
+            });
+
+            setTimeout(() => {
+                try {
+                    console.log("Initializing maps...");
+                    
+                    // Check if Leaflet is loaded
+                    if (typeof L === 'undefined') {
+                        console.error("Leaflet library not loaded! Maps will not work.");
+                        return;
+                    }
+                    
+                    // Make sure map containers exist and are visible
+                    const activeMapContainer = document.getElementById('map-active');
+                    const historyMapContainer = document.getElementById('map-history');
+                    
+                    if (!activeMapContainer || !historyMapContainer) {
+                        console.error("Map containers not found in DOM");
+                        return;
+                    }
+                    
+                    // Force size before initialization
+                    activeMapContainer.style.height = '400px';
+                    activeMapContainer.style.width = '100%';
+                    historyMapContainer.style.height = '400px'; 
+                    historyMapContainer.style.width = '100%';
+                    
+                    // Initialize the active connections map
+                    const mapActive = L.map('map-active').setView([0, 0], 2);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    }).addTo(mapActive);
+                    
+                    // Initialize the history connections map
+                    const mapHistory = L.map('map-history').setView([0, 0], 2);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    }).addTo(mapHistory);
+                    
+                    // Force map redraw
+                    setTimeout(() => {
+                        mapActive.invalidateSize();
+                        mapHistory.invalidateSize();
+                    }, 100);
+                    
+                    // Create feature groups for markers
+                    const activeMarkers = L.featureGroup().addTo(mapActive);
+                    const historyMarkers = L.featureGroup().addTo(mapHistory);
+                    
+                    // Store maps and markers globally to access them later
+                    window.ovpnMaps = {
+                        mapActive: mapActive,
+                        mapHistory: mapHistory,
+                        activeMarkers: activeMarkers,
+                        historyMarkers: historyMarkers
+                    };
+                    
+                    console.log("Maps initialized successfully");
+                    
+                    // Try to initialize maps with any existing data
+                    try {
+                        // Get initial data from the page - handle as strings first to debug
+                        const profileDataStr = '{{ profile_data|tojson|safe }}';
+                        const profileIpLogStr = '{{ profile_ip_log|tojson|safe }}';
+                        const connectionHistoryStr = '{{ connection_history|tojson|safe }}';
+                        
+                        console.log("Raw data strings:", {
+                            profileData: profileDataStr.substring(0, 50) + "...",
+                            profileIpLog: profileIpLogStr.substring(0, 50) + "...",
+                            connectionHistory: connectionHistoryStr.substring(0, 50) + "..."
+                        });
+                        
+                        // Now parse the strings
+                        profileData = JSON.parse(profileDataStr);
+                        profileIpLog = JSON.parse(profileIpLogStr);
+                        connectionHistory = JSON.parse(connectionHistoryStr);
+                        
+                        console.log("Data loaded:", {
+                            "Profiles": Object.keys(profileData).length,
+                            "History entries": connectionHistory.length
+                        });
+                        
+                        // Update maps with initial data
+                        updateActiveMap();
+                        updateHistoryMap(connectionHistory);
+                    } catch (e) {
+                        console.error("Error initializing map data:", e);
+                        console.error("Error details:", e.message);
+                        
+                        // Try to show what failed in parsing
+                        try {
+                            console.log("Template values may not be properly rendered.");
+                            
+                            // Fallback to using any existing DOM data
+                            const profileCards = document.querySelectorAll('.profile-card');
+                            if (profileCards.length > 0) {
+                                console.log("Attempting to extract data from DOM...");
+                                
+                                // Extract profile data from DOM as fallback
+                                profileData = {};
+                                profileCards.forEach(card => {
+                                    const profileName = card.querySelector('h2').textContent;
+                                    const clients = [];
+                                    
+                                    const rows = card.querySelectorAll('tbody tr');
+                                    rows.forEach(row => {
+                                        const cells = row.querySelectorAll('td');
+                                        if (cells.length >= 6) {
+                                            const client = {
+                                                common_name: cells[0].textContent,
+                                                real_address: cells[1].textContent,
+                                                location: cells[2].textContent,
+                                                connected_since: cells[3].textContent,
+                                                runtime: cells[4].textContent,
+                                                // Extract lat/lon from data attributes if available
+                                                lat: parseFloat(row.getAttribute('data-lat') || '0'),
+                                                lon: parseFloat(row.getAttribute('data-lon') || '0')
+                                            };
+                                            clients.push(client);
+                                        }
+                                    });
+                                    
+                                    profileData[profileName] = clients;
+                                });
+                                
+                                console.log("Extracted profile data from DOM:", Object.keys(profileData).length);
+                                updateActiveMap(); // Try updating with extracted data
+                            }
+                            
+                            // Do the same for history data
+                            const historyRows = document.querySelectorAll('#history-table-body tr');
+                            if (historyRows.length > 0) {
+                                connectionHistory = [];
+                                historyRows.forEach(row => {
+                                    const cells = row.querySelectorAll('td');
+                                    if (cells.length >= 8) {
+                                        const entry = {
+                                            profile: cells[0].textContent,
+                                            common_name: cells[1].textContent,
+                                            real_address: cells[2].textContent,
+                                            location: cells[3].textContent,
+                                            connected_since: cells[4].textContent,
+                                            disconnected_at: cells[5].textContent,
+                                            runtime: cells[6].textContent,
+                                            disconnect_type: cells[7].textContent.includes('Admin Kill') ? 'admin-kill' : 'client-side',
+                                            // Extract lat/lon from data attributes if available
+                                            lat: parseFloat(row.getAttribute('data-lat') || '0'),
+                                            lon: parseFloat(row.getAttribute('data-lon') || '0')
+                                        };
+                                        connectionHistory.push(entry);
+                                    }
+                                });
+                                
+                                console.log("Extracted history data from DOM:", connectionHistory.length);
+                                updateHistoryMap(connectionHistory); // Try updating with extracted data
+                            }
+                        } catch (domError) {
+                            console.error("Failed to extract data from DOM:", domError);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Error in map initialization:", e);
+                }
+            }, 500); // Increased timeout to give the DOM more time to fully render
 
             function updateActiveMap() {
+                if (!window.ovpnMaps) return;
+                
+                const { mapActive, activeMarkers } = window.ovpnMaps;
                 activeMarkers.clearLayers();
+                
+                let hasValidMarkers = false;
+                
                 for (const [profileName, clients] of Object.entries(profileData)) {
                     clients.forEach(client => {
                         if (client.lat && client.lon) {
-                            const marker = L.marker([client.lat, client.lon]).bindTooltip(client.common_name);
+                            const marker = L.marker([client.lat, client.lon]).bindTooltip(
+                                `${client.common_name} (${profileName})`
+                            );
                             activeMarkers.addLayer(marker);
+                            hasValidMarkers = true;
                         }
                     });
                 }
-                if (activeMarkers.getLayers().length > 0) {
-                    mapActive.fitBounds(activeMarkers.getBounds());
+                
+                if (hasValidMarkers) {
+                    mapActive.fitBounds(activeMarkers.getBounds(), { padding: [50, 50] });
                 } else {
                     mapActive.setView([0, 0], 2);
                 }
             }
 
             function updateHistoryMap(filteredHistory) {
+                if (!window.ovpnMaps) return;
+                
+                const { mapHistory, historyMarkers } = window.ovpnMaps;
                 historyMarkers.clearLayers();
+                
+                let hasValidMarkers = false;
+                
                 filteredHistory.forEach(entry => {
-                    if (entry.lat && entry.lon) {
-                        const marker = L.marker([entry.lat, entry.lon]).bindTooltip(entry.common_name + ' - ' + entry.connected_since);
+                    if (entry && entry.lat && entry.lon) {
+                        const marker = L.marker([entry.lat, entry.lon]).bindTooltip(
+                            `${entry.common_name} - ${entry.connected_since}`
+                        );
                         historyMarkers.addLayer(marker);
+                        hasValidMarkers = true;
                     }
                 });
-                if (historyMarkers.getLayers().length > 0) {
-                    mapHistory.fitBounds(historyMarkers.getBounds());
+                
+                if (hasValidMarkers) {
+                    mapHistory.fitBounds(historyMarkers.getBounds(), { padding: [50, 50] });
                 } else {
                     mapHistory.setView([0, 0], 2);
                 }
             }
 
             function filterHistory(searchTerm) {
+                if (!connectionHistory || !Array.isArray(connectionHistory)) {
+                    return [];
+                }
+                
+                if (!searchTerm) {
+                    return connectionHistory;
+                }
+                
+                searchTerm = searchTerm.toLowerCase();
                 return connectionHistory.filter(entry => {
-                    const text = [
-                        entry.common_name,
-                        entry.real_address,
-                        entry.location,
-                        entry.connected_since,
-                        entry.disconnected_at,
-                        entry.disconnect_type
-                    ].join(' ').toLowerCase();
-                    return text.includes(searchTerm.toLowerCase());
+                    if (!entry) return false;
+                    
+                    // Check all relevant fields for the search term
+                    return (
+                        (entry.common_name && entry.common_name.toLowerCase().includes(searchTerm)) ||
+                        (entry.real_address && entry.real_address.toLowerCase().includes(searchTerm)) ||
+                        (entry.location && entry.location.toLowerCase().includes(searchTerm)) ||
+                        (entry.profile && entry.profile.toLowerCase().includes(searchTerm)) ||
+                        (entry.connected_since && entry.connected_since.toLowerCase().includes(searchTerm)) ||
+                        (entry.disconnected_at && entry.disconnected_at.toLowerCase().includes(searchTerm)) ||
+                        (entry.disconnect_type && entry.disconnect_type.toLowerCase().includes(searchTerm))
+                    );
                 });
             }
 
@@ -484,23 +696,33 @@
                         }
                         
                         row.innerHTML = `
-                            <td>${entry.profile}</td>
-                            <td>${entry.common_name}</td>
-                            <td>${entry.real_address}</td>
-                            <td>${entry.location}</td>
-                            <td>${entry.connected_since}</td>
-                            <td>${entry.disconnected_at}</td>
-                            <td>${entry.runtime}</td>
+                            <td>${entry.profile || ''}</td>
+                            <td>${entry.common_name || ''}</td>
+                            <td>${entry.real_address || ''}</td>
+                            <td>${entry.location || ''}</td>
+                            <td>${entry.connected_since || ''}</td>
+                            <td>${entry.disconnected_at || ''}</td>
+                            <td>${entry.runtime || ''}</td>
                             <td>${disconnectBadge}</td>
                         `;
                         tbody.appendChild(row);
                     });
+                    
+                    // Remove any existing "no history" message
+                    const historyCard = document.getElementById('history-table').closest('.history-card');
+                    const existingMsg = historyCard.querySelector('p.text-muted:not(.search-message)');
+                    if (existingMsg) existingMsg.remove();
                 } else {
                     document.getElementById('history-table').style.display = 'none';
-                    const noHistory = document.createElement('p');
-                    noHistory.className = 'text-muted';
-                    noHistory.textContent = 'No connection history yet.';
-                    tbody.parentElement.parentElement.appendChild(noHistory);
+                    const historyCard = document.getElementById('history-table').closest('.history-card');
+                    
+                    // Check if we already have a "no history" message
+                    if (!historyCard.querySelector('p.text-muted:not(.search-message)')) {
+                        const noHistory = document.createElement('p');
+                        noHistory.className = 'text-muted';
+                        noHistory.textContent = 'No connection history yet.';
+                        historyCard.appendChild(noHistory);
+                    }
                 }
             }
 
@@ -536,25 +758,14 @@
                     }
                 });
             }
-
             function initializeRuntimeUpdates() {
                 updateRuntimes();
             }
 
-            setInterval(updateRuntimes, 1000);
-            initializeRuntimeUpdates();
-            // Search functionality
-            document.getElementById('searchInput').addEventListener('input', function() {
-                const searchTerm = this.value.toLowerCase().trim();
-                performSearch(searchTerm);
-            });
-
-            document.getElementById('clearSearch').addEventListener('click', function() {
-                document.getElementById('searchInput').value = '';
-                performSearch('');
-            });
-
+            // Function to handle search
             function performSearch(searchTerm) {
+                currentSearchTerm = searchTerm;
+                
                 // Search in active connections tab
                 const activeTab = document.getElementById('active');
                 const profileCards = activeTab.querySelectorAll('.profile-card');
@@ -563,12 +774,13 @@
                     const table = profileCard.querySelector('table');
                     if (!table) return; // Skip if no table (no clients)
                     
+                    // Get all rows in the table
                     const rows = table.querySelectorAll('tbody tr');
                     let visibleCount = 0;
                     
                     rows.forEach(row => {
                         const text = row.textContent.toLowerCase();
-                        if (searchTerm === '' || text.includes(searchTerm)) {
+                        if (searchTerm === '' || text.includes(searchTerm.toLowerCase())) {
                             row.style.display = '';
                             visibleCount++;
                         } else {
@@ -576,74 +788,139 @@
                         }
                     });
                     
-                    // Show/hide "No matching clients" message
+                    // Clean up any existing search messages
                     const existingSearchMsg = profileCard.querySelector('.search-message');
                     if (existingSearchMsg) {
                         existingSearchMsg.remove();
                     }
                     
+                    // Handle showing/hiding elements based on search results
                     if (visibleCount === 0 && rows.length > 0) {
                         // All rows are filtered out
                         const msg = document.createElement('p');
                         msg.className = 'text-muted search-message';
                         msg.textContent = 'No matching clients for this profile.';
-                        profileCard.appendChild(msg);
                         table.style.display = 'none';
-                    } else {
+                        profileCard.appendChild(msg);
+                    } else if (rows.length > 0) {
                         // Some rows are visible
-                        if (table) table.style.display = '';
+                        table.style.display = '';
                     }
                 });
                 
                 // Search in history tab
                 const historyTab = document.getElementById('history');
                 const historyTable = historyTab.querySelector('#history-table');
+                
                 if (historyTable) {
+                    // Filter history entries based on search term
                     const filteredHistory = filterHistory(searchTerm);
-                    const historyRows = historyTable.querySelectorAll('tbody tr');
-                    historyRows.forEach((row, index) => {
-                        if (index < filteredHistory.length) {
-                            row.style.display = '';
-                        } else {
-                            row.style.display = 'none';
-                        }
-                    });
-                    const historyCard = historyTable.closest('.history-card');
-                    const existingSearchMsg = historyCard.querySelector('.search-message');
-                    if (existingSearchMsg) existingSearchMsg.remove();
-                    if (filteredHistory.length === 0) {
-                        const msg = document.createElement('p');
-                        msg.className = 'text-muted search-message';
-                        msg.textContent = 'No matching history entries.';
-                        historyCard.appendChild(msg);
-                        historyTable.style.display = 'none';
-                    } else {
+                    
+                    // Clear the table and re-populate with filtered results
+                    const tbody = document.getElementById('history-table-body');
+                    tbody.innerHTML = '';
+                    
+                    if (filteredHistory.length > 0) {
+                        // Populate table with filtered results
+                        filteredHistory.forEach(entry => {
+                            const row = document.createElement('tr');
+                            
+                            let disconnectBadge = '';
+                            if (entry.disconnect_type === "admin-kill") {
+                                disconnectBadge = '<span class="badge bg-danger">Admin Kill</span>';
+                            } else {
+                                disconnectBadge = '<span class="badge bg-secondary">Client Side</span>';
+                            }
+                            
+                            row.innerHTML = `
+                                <td>${entry.profile || ''}</td>
+                                <td>${entry.common_name || ''}</td>
+                                <td>${entry.real_address || ''}</td>
+                                <td>${entry.location || ''}</td>
+                                <td>${entry.connected_since || ''}</td>
+                                <td>${entry.disconnected_at || ''}</td>
+                                <td>${entry.runtime || ''}</td>
+                                <td>${disconnectBadge}</td>
+                            `;
+                            tbody.appendChild(row);
+                        });
+                        
+                        // Show the table
                         historyTable.style.display = '';
+                        
+                        // Update the history map with filtered entries
+                        if (window.ovpnMaps) {
+                            updateHistoryMap(filteredHistory);
+                        }
+                        
+                        // Remove any existing search message
+                        const historyCard = historyTable.closest('.history-card');
+                        const existingSearchMsg = historyCard.querySelector('.search-message');
+                        if (existingSearchMsg) existingSearchMsg.remove();
+                    } else {
+                        // Hide the table when no results
+                        historyTable.style.display = 'none';
+                        
+                        // Show a message indicating no matches
+                        const historyCard = historyTable.closest('.history-card');
+                        let existingSearchMsg = historyCard.querySelector('.search-message');
+                        
+                        if (!existingSearchMsg) {
+                            existingSearchMsg = document.createElement('p');
+                            existingSearchMsg.className = 'text-muted search-message';
+                            existingSearchMsg.textContent = 'No matching history entries.';
+                            historyCard.appendChild(existingSearchMsg);
+                        }
+                        
+                        // Update map to show no markers
+                        if (window.ovpnMaps) {
+                            updateHistoryMap([]);
+                        }
                     }
-                    updateHistoryMap(filteredHistory);
                 }
             }
 
+            // Socket event handler for data updates
             socket.on('data_update', function(data) {
-                profileData = data.profile_data;
-                profileIpLog = data.profile_ip_log;
-                connectionHistory = data.connection_history;
+                if (!data) return;
+                
+                profileData = data.profile_data || {};
+                profileIpLog = data.profile_ip_log || {};
+                connectionHistory = data.connection_history || [];
+                
+                // Update UI with new data
                 updateProfiles(profileData, profileIpLog);
                 updateConnectionHistory(connectionHistory);
                 initializeRuntimeUpdates();
-                updateActiveMap();
-                performSearch(currentSearchTerm);
+                
+                // Update the maps
+                if (window.ovpnMaps) {
+                    updateActiveMap();
+                    
+                    // If we have a search term, apply it to filter history
+                    if (currentSearchTerm) {
+                        performSearch(currentSearchTerm);
+                    } else {
+                        updateHistoryMap(connectionHistory);
+                    }
+                }
             });
 
+            // Set up search functionality
             document.getElementById('searchInput').addEventListener('input', function() {
                 currentSearchTerm = this.value.toLowerCase().trim();
                 performSearch(currentSearchTerm);
             });
+            
             document.getElementById('clearSearch').addEventListener('click', function() {
                 document.getElementById('searchInput').value = '';
                 currentSearchTerm = '';
                 performSearch('');
             });
+
+            // Initialize runtime updates
+            setInterval(updateRuntimes, 1000);
+            initializeRuntimeUpdates();
         });
     </script>
 </body>

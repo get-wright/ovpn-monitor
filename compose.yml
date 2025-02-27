@@ -1,0 +1,9 @@
+services:
+  ovpn-monitor:
+    build:
+      context: .
+    ports:
+      - "9955:5000"
+    volumes:
+      - /run/openvpn/pt.sock:/run/openvpn/pt.sock
+      - ./data:/opt/data

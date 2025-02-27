@@ -12,9 +12,20 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc, inspect, text
 import os
 from maxminddb import open_database
+from flask_httpauth import HTTPBasicAuth
+from dotenv import load_dotenv
 
 app = Flask(__name__)
 app.secret_key = 'secret!'
+
+auth = HTTPBasicAuth()
+USERNAME = os.getenv('FLASK_USERNAME')
+PASSWORD = os.getenv('FLASK_PASSWORD')
+@auth.verify_password
+def verify_password(username, password):
+    if username == USERNAME and password == PASSWORD:
+        return username
+    return None
 
 # Database configuration
 db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ovpn_monitor.db')
@@ -142,6 +153,10 @@ def get_ip_location(ip):
         return ip_location_cache[ip]
     
     try:
+        # Handle case where reader is not initialized
+        if reader is None:
+            raise Exception("MaxMind reader is not initialized")
+            
         response = reader.get(ip)
         if response:
             city = response.get('city', {}).get('names', {}).get('en', 'Unknown')
@@ -346,6 +361,7 @@ def update_profile_status():
             time.sleep(1)  # Update every 1 seconds.
 
 @app.route('/')
+@auth.login_required
 def index():
     # Convert sets to lists for initial template render
     ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
@@ -355,6 +371,7 @@ def index():
                            connection_history=list(connection_history))
 
 @app.route('/kill/<profile_name>/<client_name>', methods=["POST"])
+@auth.login_required
 def kill_client(profile_name, client_name):
     """
     Connect to the management interface for the given profile and send the kill command for the specified client.
@@ -424,18 +441,18 @@ def kill_client(profile_name, client_name):
 # Start the background thread.
 def start_background_thread():
     global reader
-    maxmind_db_path = os.path.join(os.path.abspath(__file__), 'data', 'GeoLite2-City.mmdb')
+    maxmind_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'GeoLite2-City.mmdb')
     try:
         reader = open_database(maxmind_db_path)
+        logger.info(f"Successfully opened MaxMind database at: {maxmind_db_path}")
     except Exception as e:
         logger.error(f"Error opening MaxMind database: {e}")
+        reader = None
     threading.Thread(target=update_profile_status, daemon=True).start()
 
 if __name__ == '__main__':
     with app.app_context():
-        # Check for database schema changes and migrate as needed
         check_and_migrate_database()
-        # Load history after making sure the schema is correct
         load_connection_history()
     start_background_thread()
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

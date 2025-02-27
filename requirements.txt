@@ -1,0 +1,8 @@
+Flask
+Flask-SocketIO
+Flask-HTTPAuth
+Flask-SQLAlchemy
+SQLAlchemy
+maxminddb
+python-dotenv
+requests
