@@ -350,18 +350,63 @@ def update_profile_status():
             # Update previous clients map for next iteration
             previous_clients_map = current_clients_map.copy()
             
-            # If data has changed, emit update to clients
             if data_changed:
-                socketio.emit('data_update', {
+                update_data = {
                     'profile_data': profile_data,
-                    'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},  # Convert sets to lists for JSON
-                    'connection_history': list(connection_history)  # Convert deque to list for JSON
-                })
+                    'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
+                    'connection_history': list(connection_history)
+                }
+                
+                # Convert to JSON once
+                json_data = json.dumps(update_data)
+                
+                # Push to SSE clients
+                if hasattr(app, 'sse_clients'):
+                    # Make a copy to avoid runtime changes during iteration
+                    clients_copy = list(app.sse_clients.items())
+                    for client_id, queue in clients_copy:
+                        try:
+                            queue.append(json_data)
+                        except Exception as e:
+                            logger.error(f"Error pushing to client {client_id}: {e}")
+                            # Don't remove here, let the client connection handler do it
             
-            time.sleep(1)  # Update every 1 seconds.
+            time.sleep(1)  # Update every 1 second
 
 @app.route('/')
 @auth.login_required
+def sse_stream():
+    def event_stream():
+        # Initial data push
+        yield f"data: {json.dumps({'profile_data': profile_data, 'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()}, 'connection_history': list(connection_history)})}\n\n"
+        
+        # Create a new data queue for this client
+        client_queue = deque(maxlen=10)
+        
+        # Register this queue in a global dict of client queues
+        client_id = request.headers.get('Last-Event-ID', str(time.time()))
+        with app.app_context():
+            if not hasattr(app, 'sse_clients'):
+                app.sse_clients = {}
+            app.sse_clients[client_id] = client_queue
+        
+        try:
+            # Keep connection open and push updates from queue
+            while True:
+                # Check for new messages
+                if client_queue:
+                    data = client_queue.popleft()
+                    yield f"data: {data}\n\n"
+                
+                # Sleep to avoid maxing out CPU
+                time.sleep(0.5)
+        except GeneratorExit:
+            # Client disconnected
+            if hasattr(app, 'sse_clients') and client_id in app.sse_clients:
+                del app.sse_clients[client_id]
+    
+    return Response(event_stream(), mimetype="text/event-stream")
+
 def index():
     # Convert sets to lists for initial template render
     ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
@@ -455,4 +500,4 @@ if __name__ == '__main__':
         check_and_migrate_database()
         load_connection_history()
     start_background_thread()
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
