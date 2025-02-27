@@ -794,7 +794,6 @@
 
             function updateRuntimes() {
                 const runtimeCells = document.querySelectorAll('.runtime-cell');
-                const timezone = 'Asia/Bangkok'; // UTC+7
                 
                 runtimeCells.forEach(cell => {
                     const connectedCell = cell.previousElementSibling;
@@ -806,25 +805,25 @@
                                 const dateParts = parts[0].split('-');
                                 const timeParts = parts[1].split(':');
                                 
-                                // Create date objects with timezone consideration
-                                const connTime = new Date(
-                                    parseInt(dateParts[0]),
-                                    parseInt(dateParts[1]) - 1,
-                                    parseInt(dateParts[2]),
-                                    parseInt(timeParts[0]),
-                                    parseInt(timeParts[1]),
-                                    parseInt(timeParts[2])
-                                );
+                                // Create a date with explicit timezone offset for Bangkok (+7 hours)
+                                const connDateStr = `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}T${timeParts[0]}:${timeParts[1]}:${timeParts[2]}+07:00`;
+                                const connDate = new Date(connDateStr);
                                 
-                                // Assume the displayed time is already in UTC+7
+                                // Get current time and adjust for the +7 hour difference
                                 const now = new Date();
-                                const diffSec = Math.floor((now - connTime) / 1000);
+                                // Adjust for timezone difference between browser and UTC+7
+                                const browserOffsetHours = now.getTimezoneOffset() / 60;
+                                const offsetToAdd = 7 + browserOffsetHours;  // Calculate hours to add
                                 
-                                const hours = Math.floor(diffSec / 3600);
-                                const minutes = Math.floor((diffSec % 3600) / 60);
-                                const seconds = diffSec % 60;
+                                // Calculate difference in seconds, accounting for timezone
+                                const diffSec = Math.floor((now - connDate) / 1000) + (offsetToAdd * 3600);
                                 
-                                cell.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                                // Format runtime
+                                const hours_display = Math.floor(diffSec / 3600);
+                                const minutes_display = Math.floor((diffSec % 3600) / 60);
+                                const seconds_display = diffSec % 60;
+                                
+                                cell.textContent = `${hours_display.toString().padStart(2, '0')}:${minutes_display.toString().padStart(2, '0')}:${seconds_display.toString().padStart(2, '0')}`;
                             }
                         } catch (e) {
                             console.error('Error updating runtime:', e);
@@ -832,7 +831,7 @@
                     }
                 });
             }
-            
+
             function initializeRuntimeUpdates() {
                 updateRuntimes();
             }

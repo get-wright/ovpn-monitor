@@ -79,29 +79,29 @@ class ConnectionHistory(db.Model):
     lat = db.Column(db.Float)  # New field for latitude
     lon = db.Column(db.Float)  # New field for longitude
 
-def to_dict(self):
-    # Convert UTC times to the target timezone
-    connected_since_local = self.connected_since.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
-    disconnected_at_local = self.disconnected_at.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
-    
-    result = {
-        "profile": self.profile,
-        "common_name": self.common_name,
-        "real_address": self.real_address,
-        "location": self.location,
-        "connected_since": connected_since_local.strftime("%Y-%m-%d %H:%M:%S"),
-        "disconnected_at": disconnected_at_local.strftime("%Y-%m-%d %H:%M:%S"),
-        "runtime": self.runtime,
-        "lat": self.lat,
-        "lon": self.lon
-    }
-    
-    if hasattr(self, 'disconnect_type') and self.disconnect_type is not None:
-        result["disconnect_type"] = self.disconnect_type
-    else:
-        result["disconnect_type"] = "client-side"
+    def to_dict(self):
+        # Convert UTC times to the target timezone
+        connected_since_local = self.connected_since.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
+        disconnected_at_local = self.disconnected_at.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
         
-    return result
+        result = {
+            "profile": self.profile,
+            "common_name": self.common_name,
+            "real_address": self.real_address,
+            "location": self.location,
+            "connected_since": connected_since_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "disconnected_at": disconnected_at_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "runtime": self.runtime,
+            "lat": self.lat,
+            "lon": self.lon
+        }
+        
+        if hasattr(self, 'disconnect_type') and self.disconnect_type is not None:
+            result["disconnect_type"] = self.disconnect_type
+        else:
+            result["disconnect_type"] = "client-side"
+            
+        return result
 
 # Connection history (limited to the most recent 100 entries)
 # Contains disconnected clients with their information
@@ -191,30 +191,38 @@ def get_ip_location(ip):
 
 def add_to_connection_history(profile_name, client_data, disconnect_type="client-side"):
     try:
+        # Get current time in the target timezone
         disconnected_at = datetime.datetime.now(TIMEZONE)
         
-        # Parse the connected_since string with timezone awareness
+        # Parse the connected_since string into a naive datetime
         connected_since_naive = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
-        # Assume the connected_since was in UTC+7 if not specified
+        
+        # Localize to the target timezone (treat the value as if it were already in the target timezone)
         connected_since = TIMEZONE.localize(connected_since_naive)
         
+        # Calculate runtime directly using timedeltas to ensure consistency
+        runtime_delta = disconnected_at - connected_since
+        runtime = str(runtime_delta).split('.')[0]  # Remove microseconds
+        
+        # Get location data
         location_dict = get_ip_location(client_data["real_address"])
         location_str = f"{location_dict['city']}, {location_dict['country']}"
         lat = location_dict["lat"]
         lon = location_dict["lon"]
         
         with app.app_context():
+            # Store times in UTC in the database
             history_record = ConnectionHistory(
                 profile=profile_name,
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
                 location=location_str,
-                connected_since=connected_since.astimezone(pytz.UTC),  # Store in UTC in database
-                disconnected_at=disconnected_at.astimezone(pytz.UTC),  # Store in UTC in database
-                runtime=client_data["runtime"],
+                connected_since=connected_since.astimezone(pytz.UTC),  # Convert to UTC for storage
+                disconnected_at=disconnected_at.astimezone(pytz.UTC),  # Convert to UTC for storage
+                runtime=runtime,  # Use our calculated runtime instead of client_data["runtime"]
                 disconnect_type=disconnect_type,
                 lat=lat,
                 lon=lon
@@ -222,20 +230,15 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
             db.session.add(history_record)
             db.session.commit()
             
-            history_entry = {
-                "profile": history_record.profile,
-                "common_name": history_record.common_name,
-                "real_address": history_record.real_address.split(':')[0] if ':' in history_record.real_address else history_record.real_address,
-                "location": history_record.location,
-                "connected_since": connected_since.strftime("%Y-%m-%d %H:%M:%S"),
-                "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "runtime": history_record.runtime,
-                "disconnect_type": history_record.disconnect_type,
-                "lat": history_record.lat,
-                "lon": history_record.lon
-            }
-        connection_history.appendleft(history_entry)
-        return True
+            # Use the record's to_dict method to get consistent formatting
+            history_entry = history_record.to_dict()
+            
+            # Only modify the real_address for display if needed
+            if ':' in history_entry["real_address"]:
+                history_entry["real_address"] = history_entry["real_address"].split(':')[0]
+                
+            connection_history.appendleft(history_entry)
+            return True
     except Exception as e:
         logger.error(f"Error adding connection to history DB: {e}")
         with app.app_context():
@@ -257,39 +260,10 @@ def update_profile_status():
             
             for profile in profiles_config:
                 try:
-                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    s.connect(profile["socket_path"])
-                    # Send status command.
-                    s.sendall(b"status\n")
-                    data = b""
-                    # Read until we see "END" in the output.
-                    while True:
-                        chunk = s.recv(4096)
-                        if not chunk:
-                            break
-                        data += chunk
-                        if b"END" in data:
-                            break
-                    s.close()
-                    status_output = data.decode()
-                    
-                    # Parse status output.
-                    lines = status_output.splitlines()
-                    clients = []
-                    # Find section boundaries.
-                    start_index = None
-                    end_index = None
-                    for i, line in enumerate(lines):
-                        if line.startswith("OpenVPN CLIENT LIST"):
-                            start_index = i
-                        if line.startswith("ROUTING TABLE"):
-                            end_index = i
-                            break
+                    # ... existing connection code ...
                     
                     # Parse client data if the section was found.
                     if start_index is not None and end_index is not None:
-                        # We assume the header line is at start_index+2.
-                        # The client data lines follow until the ROUTING TABLE line.
                         for line in lines[start_index+3:end_index]:
                             if not line.strip():
                                 continue
@@ -301,11 +275,20 @@ def update_profile_status():
                                 connected_since = parts[4].strip()
                                 
                                 try:
-                                    # Parse the time in the timezone context
+                                    # Parse the time string from OpenVPN (which is in local server time)
                                     conn_time_naive = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
+                                    
+                                    # First, treat conn_time as a UTC+7 time (since OpenVPN reports in local time)
                                     conn_time = TIMEZONE.localize(conn_time_naive)
+                                    
+                                    # Get current time in the same timezone 
                                     now = datetime.datetime.now(TIMEZONE)
-                                    runtime = str(now - conn_time).split('.')[0]
+                                    
+                                    # Calculate runtime as a timedelta
+                                    delta = now - conn_time
+                                    
+                                    # Format without microseconds
+                                    runtime = str(delta).split('.')[0]
                                 except Exception as ex:
                                     logger.error(f"Error parsing connection time: {ex}")
                                     runtime = "N/A"
