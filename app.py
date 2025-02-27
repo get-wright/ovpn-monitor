@@ -1,4 +1,4 @@
-from flask import Flask, render_template, redirect, url_for, request, flash
+from flask import Flask, render_template, redirect, url_for, request, flash, Response
 import socket
 import datetime
 import threading
@@ -375,6 +375,16 @@ def update_profile_status():
 
 @app.route('/')
 @auth.login_required
+def index():
+    # Convert sets to lists for initial template render
+    ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
+    return render_template('index.html', 
+                           profile_data=profile_data, 
+                           profile_ip_log=ip_log_for_template,
+                           connection_history=list(connection_history))
+
+@app.route('/events')
+@auth.login_required
 def sse_stream():
     def event_stream():
         # Initial data push
@@ -406,14 +416,6 @@ def sse_stream():
                 del app.sse_clients[client_id]
     
     return Response(event_stream(), mimetype="text/event-stream")
-
-def index():
-    # Convert sets to lists for initial template render
-    ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
-    return render_template('index.html', 
-                           profile_data=profile_data, 
-                           profile_ip_log=ip_log_for_template,
-                           connection_history=list(connection_history))
 
 @app.route('/kill/<profile_name>/<client_name>', methods=["POST"])
 @auth.login_required
