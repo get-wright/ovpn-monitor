@@ -831,9 +831,26 @@
                 const activeTab = document.getElementById('active');
                 const profileCards = activeTab.querySelectorAll('.profile-card');
                 
+                // First make sure we have the latest data displayed
+                if (searchTerm === '') {
+                    // If clearing the search, restore full data
+                    updateProfiles(profileData, profileIpLog);
+                    updateConnectionHistory(connectionHistory);
+                    
+                    if (window.ovpnMaps) {
+                        updateActiveMap();
+                        updateHistoryMap(connectionHistory);
+                    }
+                    return; // Exit early as there's nothing to filter
+                }
+                
                 // Track visible clients for map updates
                 let visibleClients = [];
                 
+                // Update the profiles UI first with all data
+                updateProfiles(profileData, profileIpLog);
+                
+                // Then apply filtering
                 profileCards.forEach(profileCard => {
                     const table = profileCard.querySelector('table');
                     if (!table) return; // Skip if no table (no clients)
@@ -847,7 +864,7 @@
                     
                     rows.forEach(row => {
                         const text = row.textContent.toLowerCase();
-                        if (searchTerm === '' || text.includes(searchTerm.toLowerCase())) {
+                        if (text.includes(searchTerm.toLowerCase())) {
                             row.style.display = '';
                             visibleCount++;
                             
@@ -893,7 +910,11 @@
                     updateActiveMapFiltered(visibleClients);
                 }
                 
-                // Search in history tab
+                // Handle history tab searching
+                // First update with all data
+                updateConnectionHistory(connectionHistory);
+                
+                // Then apply filtering
                 const historyTab = document.getElementById('history');
                 const historyTable = historyTab.querySelector('#history-table');
                 
@@ -901,73 +922,42 @@
                     // Filter history entries based on search term
                     const filteredHistory = filterHistory(searchTerm);
                     
-                    // Clear the table and re-populate with filtered results
-                    const tbody = document.getElementById('history-table-body');
-                    tbody.innerHTML = '';
+                    // Get all rows in the history table
+                    const rows = historyTable.querySelectorAll('tbody tr');
                     
-                    if (filteredHistory.length > 0) {
-                        // Populate table with filtered results
-                        filteredHistory.forEach(entry => {
-                            const row = document.createElement('tr');
-                            
-                            let disconnectBadge = '';
-                            if (entry.disconnect_type === "admin-kill") {
-                                disconnectBadge = '<span class="badge bg-danger">Admin Kill</span>';
+                    if (rows.length > 0) {
+                        let visibleCount = 0;
+                        
+                        rows.forEach(row => {
+                            const text = row.textContent.toLowerCase();
+                            if (text.includes(searchTerm.toLowerCase())) {
+                                row.style.display = '';
+                                visibleCount++;
                             } else {
-                                disconnectBadge = '<span class="badge bg-secondary">Client Side</span>';
+                                row.style.display = 'none';
                             }
-                            
-                            // FIX: Use entry instead of client variables here
-                            row.innerHTML = `
-                                <td>${entry.profile || ''}</td>
-                                <td>${entry.common_name || ''}</td>
-                                <td>${entry.real_address || ''}</td>
-                                <td>${entry.location || 'Unknown'}</td>
-                                <td>${entry.connected_since || ''}</td>
-                                <td>${entry.disconnected_at || ''}</td>
-                                <td>${entry.runtime || ''}</td>
-                                <td>${disconnectBadge}</td>
-                            `;
-                            
-                            // Add data attributes for map data
-                            if (entry.lat && entry.lon) {
-                                row.setAttribute('data-lat', entry.lat);
-                                row.setAttribute('data-lon', entry.lon);
-                            }
-                            
-                            tbody.appendChild(row);
                         });
                         
-                        // Show the table
-                        historyTable.style.display = '';
+                        // Handle showing/hiding elements based on search results
+                        const historyCard = historyTable.closest('.history-card');
                         
-                        // Update the history map with filtered entries
+                        // Clean up any existing search messages
+                        const existingSearchMsg = historyCard.querySelector('.search-message');
+                        if (existingSearchMsg) {
+                            existingSearchMsg.remove();
+                        }
+                        
+                        if (visibleCount === 0) {
+                            // No matching results
+                            let searchMsg = document.createElement('p');
+                            searchMsg.className = 'text-muted search-message';
+                            searchMsg.textContent = 'No matching history entries.';
+                            historyCard.appendChild(searchMsg);
+                        }
+                        
+                        // Update the map with filtered entries
                         if (window.ovpnMaps) {
                             updateHistoryMap(filteredHistory);
-                        }
-                        
-                        // Remove any existing search message
-                        const historyCard = historyTable.closest('.history-card');
-                        const existingSearchMsg = historyCard.querySelector('.search-message');
-                        if (existingSearchMsg) existingSearchMsg.remove();
-                    } else {
-                        // Hide the table when no results
-                        historyTable.style.display = 'none';
-                        
-                        // Show a message indicating no matches
-                        const historyCard = historyTable.closest('.history-card');
-                        let existingSearchMsg = historyCard.querySelector('.search-message');
-                        
-                        if (!existingSearchMsg) {
-                            existingSearchMsg = document.createElement('p');
-                            existingSearchMsg.className = 'text-muted search-message';
-                            existingSearchMsg.textContent = 'No matching history entries.';
-                            historyCard.appendChild(existingSearchMsg);
-                        }
-                        
-                        // Update map to show no markers
-                        if (window.ovpnMaps) {
-                            updateHistoryMap([]);
                         }
                     }
                 }

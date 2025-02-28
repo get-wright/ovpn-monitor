@@ -444,6 +444,10 @@ def update_profile_status():
                     # Add to connection history
                     if add_to_connection_history(profile_name, client_data, "client-side"):
                         data_changed = True
+                        
+                    # Make sure it's immediately removed from profile_data too
+                    if profile_name in profile_data:
+                        profile_data[profile_name] = [c for c in profile_data[profile_name] if c.get("common_name") != common_name]
             
             # Update previous clients map for next iteration
             previous_clients_map = current_clients_map.copy()
@@ -584,10 +588,33 @@ def kill_client(profile_name, client_name):
                 # Use the helper function with admin-kill as the disconnect type
                 add_to_connection_history(profile_name, client_data, "admin-kill")
                 
+                # IMPORTANT: Also remove this client from profile_data immediately
+                if profile_name in profile_data:
+                    profile_data[profile_name] = [c for c in profile_data[profile_name] 
+                                               if c.get("common_name") != client_name]
+                
                 # Also remove this client from the previous_clients_map to prevent duplicate entries
                 client_key = (profile_name, client_name)
                 if client_key in previous_clients_map:
                     del previous_clients_map[client_key]
+                    
+                # Force an SSE update immediately
+                update_data = {
+                    'profile_data': profile_data,
+                    'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
+                    'connection_history': list(connection_history)
+                }
+                json_data = json.dumps(update_data)
+                
+                # Push to SSE clients
+                app_instance = app._get_current_object()
+                if hasattr(app_instance, 'sse_clients'):
+                    clients_copy = list(app_instance.sse_clients.items())
+                    for client_id, queue in clients_copy:
+                        try:
+                            queue.append(json_data)
+                        except Exception as e:
+                            logger.error(f"Error pushing to client {client_id}: {e}")
             else:
                 flash("Client data not found", "warning")
         else:
