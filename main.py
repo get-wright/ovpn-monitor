@@ -90,23 +90,11 @@ class ConnectionHistory(db.Model):
     lon = db.Column(db.Float)  # New field for longitude
 
     def to_dict(self):
-        # Convert UTC times to local time for display
-        try:
-            # Add timezone info to the datetime objects (as UTC)
-            connected_since_utc = pytz.UTC.localize(self.connected_since)
-            disconnected_at_utc = pytz.UTC.localize(self.disconnected_at)
-            
-            # Convert to Asia/Ho_Chi_Minh timezone
-            connected_since_local = connected_since_utc.astimezone(pytz.timezone('Asia/Ho_Chi_Minh'))
-            disconnected_at_local = disconnected_at_utc.astimezone(pytz.timezone('Asia/Ho_Chi_Minh'))
-            
-            connected_str = connected_since_local.strftime("%Y-%m-%d %H:%M:%S")
-            disconnected_str = disconnected_at_local.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception as e:
-            # Fallback if timezone conversion fails
-            connected_str = self.connected_since.strftime("%Y-%m-%d %H:%M:%S")
-            disconnected_str = self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S")
-            
+        # Since we're storing times as naive datetimes in UTC+7,
+        # we don't need to do timezone conversion for display
+        connected_str = self.connected_since.strftime("%Y-%m-%d %H:%M:%S")
+        disconnected_str = self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S")
+        
         result = {
             "profile": self.profile,
             "common_name": self.common_name,
@@ -124,6 +112,7 @@ class ConnectionHistory(db.Model):
             result["disconnect_type"] = self.disconnect_type
         else:
             result["disconnect_type"] = "client-side"  # default for old records
+            
         return result
 
 # Connection history (limited to the most recent 100 entries)
@@ -243,24 +232,28 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
     Returns True if successful, False otherwise
     """
     try:
-        # Get current time in local timezone
-        now_naive = datetime.datetime.now()
-        # Use Asia/Ho_Chi_Minh timezone (UTC+7)
-        ho_chi_minh_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-        # Make it timezone aware by assuming it's already in the target timezone
-        disconnected_at = ho_chi_minh_tz.localize(now_naive)
+        # Get current time in Asia/Ho_Chi_Minh timezone (UTC+7)
+        tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        disconnected_at = datetime.datetime.now(tz)
         
-        # Parse the connected_since string into a datetime object
-        # Also assume it's in the same timezone (UTC+7/Ho_Chi_Minh)
-        connected_since_naive = datetime.datetime.strptime(
+        # Parse the connected_since string into a datetime object (also in Asia/Ho_Chi_Minh)
+        connected_since = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
-        connected_since = ho_chi_minh_tz.localize(connected_since_naive)
+        connected_since = tz.localize(connected_since)
         
-        # Convert to UTC for database storage
-        disconnected_at_utc = disconnected_at.astimezone(pytz.UTC)
-        connected_since_utc = connected_since.astimezone(pytz.UTC)
+        # Calculate runtime using the timezone-aware objects
+        if client_data.get("runtime") and client_data["runtime"] != "N/A":
+            runtime = client_data["runtime"]
+        else:
+            # Calculate runtime as a fallback
+            delta = disconnected_at - connected_since
+            total_seconds = int(delta.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         
         # Get location data including lat/lon
         location_dict = get_ip_location(client_data["real_address"])
@@ -268,17 +261,22 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
         lat = location_dict.get("lat")
         lon = location_dict.get("lon")
         
+        # Store as naive datetimes but keeping the UTC+7 time values
+        # (removing timezone info but maintaining the UTC+7 time)
+        connected_since_naive = connected_since.replace(tzinfo=None)
+        disconnected_at_naive = disconnected_at.replace(tzinfo=None)
+        
         # Create a new session for this specific operation
         with app.app_context():
-            # Create the record within the context - store UTC times in database
+            # Create the record within the context
             history_record = ConnectionHistory(
                 profile=profile_name,
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
                 location=location_str,
-                connected_since=connected_since_utc.replace(tzinfo=None),  # SQLite doesn't store timezone info
-                disconnected_at=disconnected_at_utc.replace(tzinfo=None),  # SQLite doesn't store timezone info
-                runtime=client_data["runtime"],
+                connected_since=connected_since_naive,  # Store as UTC+7 but naive
+                disconnected_at=disconnected_at_naive,  # Store as UTC+7 but naive
+                runtime=runtime,
                 disconnect_type=disconnect_type,
                 lat=lat,
                 lon=lon
@@ -366,18 +364,34 @@ def update_profile_status():
                                 common_name = parts[0].strip()
                                 real_address = parts[1].strip()
                                 ip = real_address.split(':')[0]
-                                connected_since = parts[4].strip()
+                                connected_since_str = parts[4].strip()
                                 
                                 try:
-                                    conn_time = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
-                                    runtime = str(datetime.datetime.now() - conn_time).split('.')[0]
+                                    # Parse the timestamp assuming it's in the container's timezone (Asia/Ho_Chi_Minh)
+                                    tz = pytz.timezone('Asia/Ho_Chi_Minh')
+                                    conn_time = datetime.datetime.strptime(connected_since_str, "%Y-%m-%d %H:%M:%S")
+                                    conn_time = tz.localize(conn_time)  # Make timezone-aware
+                                    
+                                    # Calculate runtime using timezone-aware current time
+                                    now_time = datetime.datetime.now(tz)
+                                    
+                                    # Calculate delta
+                                    delta = now_time - conn_time
+                                    
+                                    # Format runtime as HH:MM:SS
+                                    total_seconds = int(delta.total_seconds())
+                                    hours = total_seconds // 3600
+                                    minutes = (total_seconds % 3600) // 60
+                                    seconds = total_seconds % 60
+                                    runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                                    
+                                    # Add a timestamp for client-side updating
+                                    connected_timestamp = int(conn_time.timestamp())
                                 except Exception as ex:
                                     logger.error(f"Error parsing connection time: {ex}")
                                     runtime = "N/A"
+                                    connected_timestamp = int(time.time())
                                     
-                                # Extract the IP part (before the colon)
-                                ip = real_address.split(':')[0]
-                                
                                 # Get location information for the IP
                                 location_dict = get_ip_location(ip)
                                 location_str = f"{location_dict['city']}, {location_dict['country']}"
@@ -386,7 +400,8 @@ def update_profile_status():
                                     "common_name": common_name,
                                     "real_address": ip,  # Store only IP address, not port
                                     "real_address_full": real_address,  # Keep full address in a separate field
-                                    "connected_since": connected_since,
+                                    "connected_since": connected_since_str,
+                                    "connected_timestamp": connected_timestamp,  # Add timestamp for client-side calcs
                                     "runtime": runtime,
                                     "location": location_str,
                                     "lat": location_dict.get("lat"),
