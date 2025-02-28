@@ -1,0 +1,9 @@
+ovpn-monitor/
+├── compose.yml
+├── data/
+│   ├── GeoLite2-City.mmdb
+├── Dockerfile
+├── main.py
+├── requirements.txt
+└── templates/
+    └── index.html

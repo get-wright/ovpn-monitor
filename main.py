@@ -1,31 +1,22 @@
-from flask import Flask, render_template, redirect, url_for, request, flash, Response
+from flask import Flask, render_template, redirect, url_for, request, flash, Response, stream_with_context
 import socket
 import datetime
 import threading
 import time
-from flask_socketio import SocketIO
-import requests
 import json
 from collections import deque
 import logging
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc, inspect, text
 import os
-import pytz
-from maxminddb import open_database  # Add this import
-from flask_httpauth import HTTPBasicAuth  # Add this import
-from dotenv import load_dotenv  # Add this import
-
-# Load environment variables
-load_dotenv()
+from maxminddb import open_database
+from flask_httpauth import HTTPBasicAuth
+from dotenv import load_dotenv
+from queue import Queue
 
 app = Flask(__name__)
-app.secret_key = os.urandom(32)
+app.secret_key = 'secret!'
 
-last_activity_time = {}  # {(profile_name, common_name): last_seen_timestamp}
-STALE_CONNECTION_TIMEOUT = 10
-
-# Add authentication
 auth = HTTPBasicAuth()
 USERNAME = os.getenv('FLASK_USERNAME')
 PASSWORD = os.getenv('FLASK_PASSWORD')
@@ -42,8 +33,6 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-socketio = SocketIO(app)
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -54,29 +43,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger('ovpn-monitor')
 
-# Configure GeoIP database (global variable will be set in start_background_thread)
-reader = None
-
 # Configuration: list of OpenVPN management interface profiles.
-# Each profile must include a unique name and its corresponding UNIX socket path.
 profiles_config = [
-    {"name": "profile1", "socket_path": "/run/openvpn/pt.sock"},
-    # You can add more profiles here, for example:
-    # {"name": "profile2", "socket_path": "/run/openvpn/profile2.sock"},
+    {"name": "Active BKCTF players", "socket_path": "/run/openvpn/pt.sock"},
 ]
 
 # In-memory dictionaries for client data and IP logging.
-# profile_data maps profile names to lists of client dictionaries.
-# profile_ip_log maps client common names to a set of IP addresses seen.
 profile_data = {}     # { profile_name: [ { "common_name": ..., "runtime": ..., "real_address": ..., "connected_since": ... }, ... ] }
 profile_ip_log = {}   # { common_name: set([ip1, ip2, ...]) }
-
-@app.template_filter('to_utc7')
-def to_utc7_filter(dt_str):
-    dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    dt_utc = pytz.UTC.localize(dt)
-    dt_utc7 = dt_utc.astimezone(pytz.timezone('Asia/Ho_Chi_Minh'))
-    return dt_utc7.strftime("%Y-%m-%d %H:%M:%S")
 
 class ConnectionHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -88,53 +62,33 @@ class ConnectionHistory(db.Model):
     disconnected_at = db.Column(db.DateTime, nullable=False)
     runtime = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    disconnect_type = db.Column(db.String(50), default="client-side")  # Added to track disconnect type
+    disconnect_type = db.Column(db.String(50), default="client-side")
     lat = db.Column(db.Float)  # New field for latitude
     lon = db.Column(db.Float)  # New field for longitude
 
     def to_dict(self):
-        # Since we're storing times as naive datetimes in UTC+7,
-        # we don't need to do timezone conversion for display
-        connected_str = self.connected_since.strftime("%Y-%m-%d %H:%M:%S")
-        disconnected_str = self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S")
-        
         result = {
             "profile": self.profile,
             "common_name": self.common_name,
             "real_address": self.real_address,
             "location": self.location,
-            "connected_since": connected_str,
-            "disconnected_at": disconnected_str,
+            "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
+            "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
             "runtime": self.runtime,
             "lat": self.lat,
             "lon": self.lon
         }
-        
-        # Add disconnect_type if it exists (to handle old records in DB)
-        if hasattr(self, 'disconnect_type') and self.disconnect_type is not None:
-            result["disconnect_type"] = self.disconnect_type
-        else:
-            result["disconnect_type"] = "client-side"  # default for old records
-            
+        result["disconnect_type"] = self.disconnect_type if self.disconnect_type is not None else "client-side"
         return result
 
 # Connection history (limited to the most recent 100 entries)
-# Contains disconnected clients with their information
-connection_history = deque(maxlen=100)  # [{common_name, real_address, location, connected_since, disconnected_at, runtime, profile}]
+connection_history = deque(maxlen=100)
 
 def check_and_migrate_database():
-    """
-    Check if the database schema matches our models and perform migrations if needed
-    """
     with app.app_context():
-        # Create all tables if they don't exist
         db.create_all()
-        
-        # Check if columns exist in ConnectionHistory table
         inspector = inspect(db.engine)
         columns = [col['name'] for col in inspector.get_columns('connection_history')]
-        
-        # Check for disconnect_type column
         if 'disconnect_type' not in columns:
             logger.info("Adding disconnect_type column to connection_history table")
             try:
@@ -144,38 +98,13 @@ def check_and_migrate_database():
             except Exception as e:
                 logger.error(f"Error adding disconnect_type column: {e}")
                 db.session.rollback()
-        
-        # Check for lat and lon columns
-        if 'lat' not in columns:
-            logger.info("Adding lat column to connection_history table")
-            try:
-                db.session.execute(text('ALTER TABLE connection_history ADD COLUMN lat FLOAT'))
-                db.session.commit()
-                logger.info("Successfully added lat column")
-            except Exception as e:
-                logger.error(f"Error adding lat column: {e}")
-                db.session.rollback()
-                
-        if 'lon' not in columns:
-            logger.info("Adding lon column to connection_history table")
-            try:
-                db.session.execute(text('ALTER TABLE connection_history ADD COLUMN lon FLOAT'))
-                db.session.commit()
-                logger.info("Successfully added lon column")
-            except Exception as e:
-                logger.error(f"Error adding lon column: {e}")
-                db.session.rollback()
 
 def load_connection_history():
-    """
-    Load recent connection history from the database into the in-memory cache
-    """
     global connection_history
     try:
         history_records = ConnectionHistory.query.order_by(
             desc(ConnectionHistory.disconnected_at)
         ).limit(100).all()
-        
         connection_history = deque(
             [record.to_dict() for record in history_records],
             maxlen=100
@@ -183,33 +112,23 @@ def load_connection_history():
         logger.info(f"Loaded {len(connection_history)} connection history records from database")
     except Exception as e:
         logger.error(f"Error loading connection history: {e}")
-        connection_history = deque(maxlen=100)  # Initialize empty if there's an error
+        connection_history = deque(maxlen=100)
 
 # Cache for IP geolocation data
-ip_location_cache = {}  # {ip: {country: ..., city: ...}}
+ip_location_cache = {}
 
 # Store a copy of previous clients for tracking disconnections 
-previous_clients_map = {}  # {(profile_name, common_name): client_data}
+previous_clients_map = {}
 
 def get_ip_location(ip):
-    """
-    Get location information for an IP address using the MaxMind GeoIP database.
-    Caches results to avoid repeated lookups for the same IP.
-    """
-    # Return cached result if available
     if ip in ip_location_cache:
         return ip_location_cache[ip]
-    
     try:
-        # Handle case where reader is not initialized
-        if reader is None:
-            raise Exception("MaxMind reader is not initialized")
-            
         response = reader.get(ip)
         if response:
             city = response.get('city', {}).get('names', {}).get('en', 'Unknown')
             country = response.get('country', {}).get('names', {}).get('en', 'Unknown')
-            region = response.get('subdivisions', [{}])[0].get('names', {}).get('en', '') if response.get('subdivisions') else ''
+            region = response.get('subdivisions', [{}])[0].get('names', {}).get('en', '')
             lat = response.get('location', {}).get('latitude', None)
             lon = response.get('location', {}).get('longitude', None)
             location = {
@@ -223,191 +142,82 @@ def get_ip_location(ip):
             return location
     except Exception as e:
         logger.error(f"Error getting location for IP {ip}: {e}")
-    
-    # Return default if database lookup fails
     default = {"country": "Unknown", "city": "Unknown", "region": "", "lat": None, "lon": None}
     ip_location_cache[ip] = default
     return default
 
 def add_to_connection_history(profile_name, client_data, disconnect_type="client-side"):
-    """
-    Helper function to add a client to the connection history database and in-memory cache
-    Returns True if successful, False otherwise
-    """
     try:
-        # Get current time in Asia/Ho_Chi_Minh timezone (UTC+7)
-        tz = pytz.timezone('Asia/Ho_Chi_Minh')
-        disconnected_at = datetime.datetime.now(tz)
-        
-        # Parse the connected_since string into a datetime object (also in Asia/Ho_Chi_Minh)
+        disconnected_at = datetime.datetime.now()
         connected_since = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
-        connected_since = tz.localize(connected_since)
-        
-        # Calculate runtime using the timezone-aware objects
-        if client_data.get("runtime") and client_data["runtime"] != "N/A":
-            runtime = client_data["runtime"]
-        else:
-            # Calculate runtime as a fallback
-            delta = disconnected_at - connected_since
-            total_seconds = int(delta.total_seconds())
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
-            runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        
-        # Get location data including lat/lon
         location_dict = get_ip_location(client_data["real_address"])
         location_str = f"{location_dict['city']}, {location_dict['country']}"
-        lat = location_dict.get("lat")
-        lon = location_dict.get("lon")
-        
-        # Store as naive datetimes but keeping the UTC+7 time values
-        # (removing timezone info but maintaining the UTC+7 time)
-        connected_since_naive = connected_since.replace(tzinfo=None)
-        disconnected_at_naive = disconnected_at.replace(tzinfo=None)
-        
-        # Create a new session for this specific operation
+        lat = location_dict["lat"]
+        lon = location_dict["lon"]
         with app.app_context():
-            # Create the record within the context
             history_record = ConnectionHistory(
                 profile=profile_name,
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
                 location=location_str,
-                connected_since=connected_since_naive,  # Store as UTC+7 but naive
-                disconnected_at=disconnected_at_naive,  # Store as UTC+7 but naive
-                runtime=runtime,
+                connected_since=connected_since,
+                disconnected_at=disconnected_at,
+                runtime=client_data["runtime"],
                 disconnect_type=disconnect_type,
                 lat=lat,
                 lon=lon
             )
-            
-            # Add to session and commit within the context
             db.session.add(history_record)
             db.session.commit()
-            
-            # Create the dict representation while still in context
-            history_entry = history_record.to_dict()
-            
-            # Simplify real address if it includes port
-            if ':' in history_entry["real_address"]:
-                history_entry["real_address"] = history_entry["real_address"].split(':')[0]
-        
-        # Now outside the context, we can safely use the dict representation
+            history_entry = {
+                "profile": history_record.profile,
+                "common_name": history_record.common_name,
+                "real_address": history_record.real_address.split(':')[0] if ':' in history_record.real_address else history_record.real_address,
+                "location": history_record.location,
+                "connected_since": connected_since.strftime("%Y-%m-%d %H:%M:%S"),
+                "disconnected_at": disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "runtime": history_record.runtime,
+                "disconnect_type": history_record.disconnect_type,
+                "lat": history_record.lat,
+                "lon": history_record.lon
+            }
         connection_history.appendleft(history_entry)
-        
-        logger.info(f"Added to history DB: {client_data['common_name']} ({disconnect_type})")
         return True
     except Exception as e:
         logger.error(f"Error adding connection to history DB: {e}")
-        try:
-            # Ensure we rollback if there was an error
-            with app.app_context():
-                db.session.rollback()
-        except:
-            pass
+        with app.app_context():
+            db.session.rollback()
         return False
 
+# Global list of SSE client queues
+sse_clients = []
+
 def update_profile_status():
-    """
-    Background thread function that periodically connects to each OpenVPN management interface,
-    sends the "status" command, parses the output, and updates the client list and IP logs.
-    """
-    global previous_clients_map, last_activity_time
-    
-    # Create an application context for this thread
+    global previous_clients_map
     with app.app_context():
         while True:
             data_changed = False
-            current_clients_map = {}  # Track currently active clients with their data
-            current_time = time.time()
-            
-            # First check for stale connections
-            for client_key, last_seen in list(last_activity_time.items()):
-                if current_time - last_seen > STALE_CONNECTION_TIMEOUT:
-                    profile_name, common_name = client_key
-                    
-                    # Only process if we still have the client in our records
-                    if client_key in previous_clients_map:
-                        client_data = previous_clients_map[client_key]
-                        logger.info(f"Client connection stale: {common_name} from {profile_name} (timeout)")
-                        
-                        # Add to connection history
-                        if add_to_connection_history(profile_name, client_data, "timeout"):
-                            data_changed = True
-                            
-                        # Remove from tracking structures
-                        del previous_clients_map[client_key]
-                        del last_activity_time[client_key]
-                        
-                        # Remove from profile_data immediately
-                        if profile_name in profile_data:
-                            profile_data[profile_name] = [c for c in profile_data[profile_name] 
-                                                      if c.get("common_name") != common_name]
-            
-            # Now process each VPN profile
+            current_clients_map = {}
             for profile in profiles_config:
                 try:
-                    # Create socket with timeout
                     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    s.settimeout(5)  # 5 second timeout for operations
-                    
-                    try:
-                        s.connect(profile["socket_path"])
-                    except socket.timeout:
-                        logger.error(f"Timeout connecting to socket for {profile['name']}")
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error connecting to socket for {profile['name']}: {e}")
-                        continue
-                    
-                    # Send status command
-                    try:
-                        s.sendall(b"status\n")
-                    except socket.timeout:
-                        logger.error(f"Timeout sending command to {profile['name']}")
-                        s.close()
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error sending command to {profile['name']}: {e}")
-                        s.close()
-                        continue
-                    
-                    # Read response with timeout protection
+                    s.connect(profile["socket_path"])
+                    s.sendall(b"status\n")
                     data = b""
-                    try:
-                        start_time = time.time()
-                        while time.time() - start_time < 5:  # 5 second max read time
-                            try:
-                                chunk = s.recv(4096)
-                                if not chunk:
-                                    break
-                                data += chunk
-                                if b"END" in data:
-                                    break
-                            except socket.timeout:
-                                logger.warning(f"Socket read timed out for {profile['name']}")
-                                break
-                            except Exception as e:
-                                logger.error(f"Error reading from socket for {profile['name']}: {e}")
-                                break
-                    finally:
-                        s.close()
-                    
-                    if not data:
-                        logger.error(f"No data received from {profile['name']}")
-                        continue
-                        
+                    while True:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                        if b"END" in data:
+                            break
+                    s.close()
                     status_output = data.decode()
-                    
-                    # Parse status output
                     lines = status_output.splitlines()
                     clients = []
-                    
-                    # Find section boundaries
                     start_index = None
                     end_index = None
                     for i, line in enumerate(lines):
@@ -416,8 +226,6 @@ def update_profile_status():
                         if line.startswith("ROUTING TABLE"):
                             end_index = i
                             break
-                    
-                    # Parse client data if section was found
                     if start_index is not None and end_index is not None:
                         for line in lines[start_index+3:end_index]:
                             if not line.strip():
@@ -426,333 +234,146 @@ def update_profile_status():
                             if len(parts) >= 5:
                                 common_name = parts[0].strip()
                                 real_address = parts[1].strip()
-                                ip = real_address.split(':')[0]
-                                connected_since_str = parts[4].strip()
-                                
+                                connected_since = parts[4].strip()
                                 try:
-                                    # Parse the timestamp assuming it's in the container's timezone
-                                    tz = pytz.timezone('Asia/Ho_Chi_Minh')
-                                    conn_time = datetime.datetime.strptime(connected_since_str, "%Y-%m-%d %H:%M:%S")
-                                    conn_time = tz.localize(conn_time)  # Make timezone-aware
-                                    
-                                    # Calculate runtime using timezone-aware current time
-                                    now_time = datetime.datetime.now(tz)
-                                    
-                                    # Calculate delta
-                                    delta = now_time - conn_time
-                                    
-                                    # Format runtime as HH:MM:SS
-                                    total_seconds = int(delta.total_seconds())
-                                    hours = total_seconds // 3600
-                                    minutes = (total_seconds % 3600) // 60
-                                    seconds = total_seconds % 60
-                                    runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                                    
-                                    # Add a timestamp for client-side updating
-                                    connected_timestamp = int(conn_time.timestamp())
+                                    conn_time = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
+                                    runtime = str(datetime.datetime.now() - conn_time).split('.')[0]
                                 except Exception as ex:
                                     logger.error(f"Error parsing connection time: {ex}")
                                     runtime = "N/A"
-                                    connected_timestamp = int(time.time())
-                                    
-                                # Get location information for the IP
+                                ip = real_address.split(':')[0]
                                 location_dict = get_ip_location(ip)
                                 location_str = f"{location_dict['city']}, {location_dict['country']}"
-                                
                                 client_data = {
                                     "common_name": common_name,
-                                    "real_address": ip,  # Store only IP address, not port
-                                    "real_address_full": real_address,  # Keep full address in a separate field
-                                    "connected_since": connected_since_str,
-                                    "connected_timestamp": connected_timestamp,
+                                    "real_address": ip,
+                                    "real_address_full": real_address,
+                                    "connected_since": connected_since,
                                     "runtime": runtime,
                                     "location": location_str,
-                                    "lat": location_dict.get("lat"),
-                                    "lon": location_dict.get("lon")
+                                    "lat": location_dict["lat"],
+                                    "lon": location_dict["lon"]
                                 }
-                                
                                 clients.append(client_data)
-                                
-                                # Store in current clients map
                                 client_key = (profile["name"], common_name)
                                 current_clients_map[client_key] = client_data
-                                
-                                # Update last activity time
-                                last_activity_time[client_key] = current_time
-                                
-                                # Update the IP log
                                 if common_name not in profile_ip_log:
                                     profile_ip_log[common_name] = set()
                                     data_changed = True
                                 if ip not in profile_ip_log[common_name]:
                                     profile_ip_log[common_name].add(ip)
                                     data_changed = True
-                    
-                    # Check if client data has changed
                     old_clients = profile_data.get(profile["name"], [])
                     if len(old_clients) != len(clients) or any(old != new for old, new in zip(old_clients, clients)):
                         data_changed = True
-                    
                     profile_data[profile["name"]] = clients
                 except Exception as e:
                     logger.error(f"Error updating profile {profile['name']}: {e}")
-                    # Don't clear client list on temporary errors - let stale detection handle it
-            
-            # Check for disconnected clients
+                    if profile["name"] in profile_data and profile_data[profile["name"]]:
+                        profile_data[profile["name"]] = []
+                        data_changed = True
             for client_key, client_data in list(previous_clients_map.items()):
                 if client_key not in current_clients_map:
                     profile_name, common_name = client_key
                     logger.info(f"Client disconnected: {common_name} from {profile_name} (client-side)")
-                    
-                    # Add to connection history
                     if add_to_connection_history(profile_name, client_data, "client-side"):
                         data_changed = True
-                    
-                    # Remove from tracking
-                    if client_key in last_activity_time:
-                        del last_activity_time[client_key]
-                        
-                    # Make sure it's immediately removed from profile_data too
-                    if profile_name in profile_data:
-                        profile_data[profile_name] = [c for c in profile_data[profile_name] 
-                                                  if c.get("common_name") != common_name]
-            
-            # Update previous clients map for next iteration
             previous_clients_map = current_clients_map.copy()
-            
-            # If data has changed, emit update to clients via SSE
             if data_changed:
-                update_data = {
+                sse_data = json.dumps({
                     'profile_data': profile_data,
                     'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
                     'connection_history': list(connection_history)
-                }
-                
-                # Convert to JSON once
-                json_data = json.dumps(update_data)
-                
-                # Push to SSE clients - use direct app reference
-                app_instance = app._get_current_object()
-                if hasattr(app_instance, 'sse_clients'):
-                    # Make a copy to avoid runtime changes during iteration
-                    clients_copy = list(app_instance.sse_clients.items())
-                    for client_id, queue in clients_copy:
-                        try:
-                            queue.append(json_data)
-                        except Exception as e:
-                            logger.error(f"Error pushing to client {client_id}: {e}")
-            
-            time.sleep(1)  # Update every 1 second.
+                })
+                for q in sse_clients:
+                    q.put(sse_data)
+            time.sleep(1)
 
 @app.route('/')
 @auth.login_required
 def index():
-    # Convert sets to lists for initial template render
     ip_log_for_template = {k: list(v) for k, v in profile_ip_log.items()}
     return render_template('index.html', 
                            profile_data=profile_data, 
                            profile_ip_log=ip_log_for_template,
                            connection_history=list(connection_history))
 
-@app.route('/events')
-@auth.login_required
-def sse_stream():
-    """
-    Route handler for Server-Sent Events (SSE)
-    Pushes real-time updates to connected clients
-    """
-    def event_stream():
-        # Generate a client ID at the beginning when the request context is still active
-        client_id = request.headers.get('Last-Event-ID', str(time.time()))
-        
-        # Initial data push
-        initial_data = {
-            'profile_data': profile_data, 
-            'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
-            'connection_history': list(connection_history)
-        }
-        yield f"data: {json.dumps(initial_data)}\n\n"
-        
-        # Create a new data queue for this client
-        client_queue = deque(maxlen=10)
-        
-        # Register this queue in a global dict of client queues
-        # Use app._get_current_object() to get a direct reference to the app
-        app_instance = app._get_current_object()
-        if not hasattr(app_instance, 'sse_clients'):
-            app_instance.sse_clients = {}
-        app_instance.sse_clients[client_id] = client_queue
-        
-        try:
-            # Keep connection open and push updates from queue
-            while True:
-                # Check for new messages
-                if client_queue:
-                    data = client_queue.popleft()
-                    yield f"data: {data}\n\n"
-                
-                # Sleep to avoid maxing out CPU
-                time.sleep(0.5)
-        except GeneratorExit:
-            # Client disconnected - use app_instance reference
-            if hasattr(app_instance, 'sse_clients') and client_id in app_instance.sse_clients:
-                del app_instance.sse_clients[client_id]
-    
-    return Response(event_stream(), mimetype="text/event-stream")
-
 @app.route('/kill/<profile_name>/<client_name>', methods=["POST"])
 @auth.login_required
 def kill_client(profile_name, client_name):
-    """
-    Connect to the management interface for the given profile and send the kill command for the specified client.
-    """
-    # Find the profile configuration
     profile = next((p for p in profiles_config if p["name"] == profile_name), None)
     if not profile:
         flash("Profile not found", "error")
         return redirect(url_for("index"))
-    
-    # Find client data before killing
     client_data = None
     if profile_name in profile_data:
         for client in profile_data[profile_name]:
             if client.get("common_name") == client_name:
                 client_data = client
                 break
-    
     try:
-        # Create socket with timeout
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(5)  # 5 second timeout
-        
-        try:
-            s.connect(profile["socket_path"])
-        except socket.timeout:
-            flash("Timeout connecting to management socket", "error")
-            return redirect(url_for("index"))
-        except Exception as e:
-            flash(f"Error connecting to management socket: {e}", "error")
-            return redirect(url_for("index"))
-        
-        # Read welcome banner with timeout
-        try:
-            banner = s.recv(4096).decode()
-        except socket.timeout:
-            flash("Timeout reading from management socket", "error")
-            s.close()
-            return redirect(url_for("index"))
-        except Exception as e:
-            flash(f"Error reading from management socket: {e}", "error")
-            s.close()
-            return redirect(url_for("index"))
-        
-        # Send kill command
+        s.connect(profile["socket_path"])
+        banner = s.recv(4096).decode()
         cmd = f"kill {client_name}\n"
-        try:
-            s.sendall(cmd.encode())
-        except socket.timeout:
-            flash("Timeout sending kill command", "error")
-            s.close()
-            return redirect(url_for("index"))
-        except Exception as e:
-            flash(f"Error sending kill command: {e}", "error")
-            s.close()
-            return redirect(url_for("index"))
-        
-        # Read response with timeout protection
+        s.sendall(cmd.encode())
         data = b""
-        try:
-            start_time = time.time()
-            while time.time() - start_time < 5:  # 5 second max read time
-                try:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                    if b"SUCCESS" in data or b"ERROR" in data:
-                        break
-                except socket.timeout:
-                    flash("Timeout reading kill response", "warning")
-                    break
-                except Exception as e:
-                    flash(f"Error reading kill response: {e}", "error")
-                    break
-                    
-                # Safety limit on response size
-                if len(data) > 8192:
-                    break
-        finally:
-            s.close()
-            
-        response = data.decode().strip() if data else "No response"
-        
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"SUCCESS" in data or b"ERROR" in data:
+                break
+            if len(data) > 8192:
+                break
+        response = data.decode().strip()
+        s.close()
         if "SUCCESS" in response:
             flash(f"Successfully killed connection for {client_name}", "success")
-            
-            # Add to connection history if we found the client data
             if client_data:
-                # Use the helper function with admin-kill as the disconnect type
                 add_to_connection_history(profile_name, client_data, "admin-kill")
-                
-                # IMPORTANT: Also remove this client from profile_data immediately
-                if profile_name in profile_data:
-                    profile_data[profile_name] = [c for c in profile_data[profile_name] 
-                                               if c.get("common_name") != client_name]
-                
-                # Also remove from all tracking structures
                 client_key = (profile_name, client_name)
                 if client_key in previous_clients_map:
                     del previous_clients_map[client_key]
-                
-                if client_key in last_activity_time:
-                    del last_activity_time[client_key]
-                    
-                # Force an SSE update immediately
-                update_data = {
-                    'profile_data': profile_data,
-                    'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
-                    'connection_history': list(connection_history)
-                }
-                json_data = json.dumps(update_data)
-                
-                # Push to SSE clients
-                app_instance = app._get_current_object()
-                if hasattr(app_instance, 'sse_clients'):
-                    clients_copy = list(app_instance.sse_clients.items())
-                    for client_id, queue in clients_copy:
-                        try:
-                            queue.append(json_data)
-                        except Exception as e:
-                            logger.error(f"Error pushing to client {client_id}: {e}")
             else:
                 flash("Client data not found", "warning")
         else:
             flash(f"Kill command response: {response}", "info")
     except Exception as e:
-        flash(f"Error in kill operation: {e}", "error")
-    
+        flash(f"Error sending kill command: {e}", "error")
     return redirect(url_for("index"))
 
-# Start the background thread.
+@app.route('/events')
+def sse_stream():
+    def event_stream(q):
+        try:
+            while True:
+                data = q.get()
+                yield f"data: {data}\n\n"
+        except GeneratorExit:
+            if q in sse_clients:
+                sse_clients.remove(q)
+    q = Queue()
+    sse_clients.append(q)
+    return Response(stream_with_context(event_stream(q)), mimetype="text/event-stream")
+
 def start_background_thread():
-    """Initialize the GeoIP database and start the background update thread"""
     global reader
-    # Initialize MaxMind GeoIP database
+    # Fix: Use the directory containing the script, not the script path itself
     maxmind_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'GeoLite2-City.mmdb')
     try:
         reader = open_database(maxmind_db_path)
         logger.info(f"Successfully opened MaxMind database at: {maxmind_db_path}")
     except Exception as e:
         logger.error(f"Error opening MaxMind database: {e}")
+        # Fallback to None for the reader, to avoid errors in get_ip_location
         reader = None
-        
     threading.Thread(target=update_profile_status, daemon=True).start()
 
 if __name__ == '__main__':
     with app.app_context():
-        # Check for database schema changes and migrate as needed
         check_and_migrate_database()
-        # Load history after making sure the schema is correct
         load_connection_history()
     start_background_thread()
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
