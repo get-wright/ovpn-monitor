@@ -243,12 +243,24 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
     Returns True if successful, False otherwise
     """
     try:
-        disconnected_at = datetime.datetime.now()
+        # Get current time in local timezone
+        now_naive = datetime.datetime.now()
+        # Use Asia/Ho_Chi_Minh timezone (UTC+7)
+        ho_chi_minh_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        # Make it timezone aware by assuming it's already in the target timezone
+        disconnected_at = ho_chi_minh_tz.localize(now_naive)
+        
         # Parse the connected_since string into a datetime object
-        connected_since = datetime.datetime.strptime(
+        # Also assume it's in the same timezone (UTC+7/Ho_Chi_Minh)
+        connected_since_naive = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
+        connected_since = ho_chi_minh_tz.localize(connected_since_naive)
+        
+        # Convert to UTC for database storage
+        disconnected_at_utc = disconnected_at.astimezone(pytz.UTC)
+        connected_since_utc = connected_since.astimezone(pytz.UTC)
         
         # Get location data including lat/lon
         location_dict = get_ip_location(client_data["real_address"])
@@ -258,14 +270,14 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
         
         # Create a new session for this specific operation
         with app.app_context():
-            # Create the record within the context
+            # Create the record within the context - store UTC times in database
             history_record = ConnectionHistory(
                 profile=profile_name,
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
                 location=location_str,
-                connected_since=connected_since,
-                disconnected_at=disconnected_at,
+                connected_since=connected_since_utc.replace(tzinfo=None),  # SQLite doesn't store timezone info
+                disconnected_at=disconnected_at_utc.replace(tzinfo=None),  # SQLite doesn't store timezone info
                 runtime=client_data["runtime"],
                 disconnect_type=disconnect_type,
                 lat=lat,
