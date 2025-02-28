@@ -444,10 +444,11 @@ def update_profile_status():
                 # Convert to JSON once
                 json_data = json.dumps(update_data)
                 
-                # Push to SSE clients
-                if hasattr(app, 'sse_clients'):
+                # Push to SSE clients - use direct app reference
+                app_instance = app._get_current_object()
+                if hasattr(app_instance, 'sse_clients'):
                     # Make a copy to avoid runtime changes during iteration
-                    clients_copy = list(app.sse_clients.items())
+                    clients_copy = list(app_instance.sse_clients.items())
                     for client_id, queue in clients_copy:
                         try:
                             queue.append(json_data)
@@ -474,6 +475,9 @@ def sse_stream():
     Pushes real-time updates to connected clients
     """
     def event_stream():
+        # Generate a client ID at the beginning when the request context is still active
+        client_id = request.headers.get('Last-Event-ID', str(time.time()))
+        
         # Initial data push
         initial_data = {
             'profile_data': profile_data, 
@@ -486,11 +490,11 @@ def sse_stream():
         client_queue = deque(maxlen=10)
         
         # Register this queue in a global dict of client queues
-        client_id = request.headers.get('Last-Event-ID', str(time.time()))
-        with app.app_context():
-            if not hasattr(app, 'sse_clients'):
-                app.sse_clients = {}
-            app.sse_clients[client_id] = client_queue
+        # Use app._get_current_object() to get a direct reference to the app
+        app_instance = app._get_current_object()
+        if not hasattr(app_instance, 'sse_clients'):
+            app_instance.sse_clients = {}
+        app_instance.sse_clients[client_id] = client_queue
         
         try:
             # Keep connection open and push updates from queue
@@ -503,9 +507,9 @@ def sse_stream():
                 # Sleep to avoid maxing out CPU
                 time.sleep(0.5)
         except GeneratorExit:
-            # Client disconnected
-            if hasattr(app, 'sse_clients') and client_id in app.sse_clients:
-                del app.sse_clients[client_id]
+            # Client disconnected - use app_instance reference
+            if hasattr(app_instance, 'sse_clients') and client_id in app_instance.sse_clients:
+                del app_instance.sse_clients[client_id]
     
     return Response(event_stream(), mimetype="text/event-stream")
 

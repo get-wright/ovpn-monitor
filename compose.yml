@@ -7,3 +7,5 @@ services:
     volumes:
       - /run/openvpn/pt.sock:/run/openvpn/pt.sock
       - ./data:/opt/data
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
