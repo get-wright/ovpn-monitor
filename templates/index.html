@@ -438,93 +438,97 @@
                 updateRuntimes();
             }
 
+            function updateHistoryMapForName(filteredHistory) {
+                if (!window.ovpnMaps) return;
+                const { mapHistory, historyMarkers } = window.ovpnMaps;
+                historyMarkers.clearLayers();
+                let coords = [];
+                // sort entries by connected_since ascending
+                filteredHistory.sort((a, b) => new Date(a.connected_since) - new Date(b.connected_since));
+                filteredHistory.forEach(entry => {
+                    if (entry && entry.lat && entry.lon) {
+                    const marker = L.marker([entry.lat, entry.lon])
+                        .bindTooltip(`${entry.common_name} - ${entry.connected_since}`);
+                    historyMarkers.addLayer(marker);
+                    coords.push([entry.lat, entry.lon]);
+                    }
+                });
+                // If more than one connection, draw a polyline connecting them.
+                if (coords.length > 1) {
+                    const polyline = L.polyline(coords, { color: 'blue' });
+                    historyMarkers.addLayer(polyline);
+                }
+                if (historyMarkers.getLayers().length > 0) {
+                    mapHistory.fitBounds(historyMarkers.getBounds(), { padding: [50, 50] });
+                } else {
+                    mapHistory.setView([0, 0], 2);
+                }
+            }
+
             function performSearch(searchTerm) {
                 currentSearchTerm = searchTerm;
+                // update active connections filtering (as before)
                 const activeTab = document.getElementById('active');
                 const profileCards = activeTab.querySelectorAll('.profile-card');
-                if (searchTerm === '') {
-                    updateProfiles(profileData, profileIpLog);
-                    updateConnectionHistory(connectionHistory);
-                    if (window.ovpnMaps) {
-                        updateActiveMap();
-                        updateHistoryMap(connectionHistory);
-                    }
-                    return;
-                }
-                let visibleClients = [];
                 updateProfiles(profileData, profileIpLog);
                 profileCards.forEach(profileCard => {
                     const table = profileCard.querySelector('table');
                     if (!table) return;
-                    const profileName = profileCard.querySelector('h2').textContent;
                     const rows = table.querySelectorAll('tbody tr');
                     let visibleCount = 0;
                     rows.forEach(row => {
-                        const text = row.textContent.toLowerCase();
-                        if (text.includes(searchTerm.toLowerCase())) {
-                            row.style.display = '';
-                            visibleCount++;
-                            if (profileData[profileName]) {
-                                const commonName = row.querySelector('td:first-child').textContent;
-                                const client = profileData[profileName].find(c => c.common_name === commonName);
-                                if (client) {
-                                    visibleClients.push({
-                                        ...client,
-                                        profile: profileName
-                                    });
-                                }
-                            }
-                        } else {
-                            row.style.display = 'none';
-                        }
+                    const text = row.textContent.toLowerCase();
+                    if (text.includes(searchTerm.toLowerCase())) {
+                        row.style.display = '';
+                        visibleCount++;
+                    } else {
+                        row.style.display = 'none';
+                    }
                     });
                     const existingSearchMsg = profileCard.querySelector('.search-message');
-                    if (existingSearchMsg) {
-                        existingSearchMsg.remove();
-                    }
+                    if (existingSearchMsg) { existingSearchMsg.remove(); }
                     if (visibleCount === 0 && rows.length > 0) {
-                        const msg = document.createElement('p');
-                        msg.className = 'text-muted search-message';
-                        msg.textContent = 'No matching clients for this profile.';
-                        table.style.display = 'none';
-                        profileCard.appendChild(msg);
+                    const msg = document.createElement('p');
+                    msg.className = 'text-muted search-message';
+                    msg.textContent = 'No matching clients for this profile.';
+                    table.style.display = 'none';
+                    profileCard.appendChild(msg);
                     } else if (rows.length > 0) {
-                        table.style.display = '';
+                    table.style.display = '';
                     }
                 });
-                if (window.ovpnMaps && window.ovpnMaps.mapActive) {
-                    updateActiveMapFiltered(visibleClients);
-                }
-                updateConnectionHistory(connectionHistory);
-                const historyTab = document.getElementById('history');
-                const historyTable = historyTab.querySelector('#history-table');
-                if (historyTable) {
-                    const filteredHistory = filterHistory(searchTerm);
-                    const rows = historyTable.querySelectorAll('tbody tr');
-                    if (rows.length > 0) {
-                        let visibleCount = 0;
-                        rows.forEach(row => {
-                            const text = row.textContent.toLowerCase();
-                            if (text.includes(searchTerm.toLowerCase())) {
-                                row.style.display = '';
-                                visibleCount++;
-                            } else {
-                                row.style.display = 'none';
-                            }
-                        });
-                        const historyCard = historyTable.closest('.history-card');
-                        const existingSearchMsg = historyCard.querySelector('.search-message');
-                        if (existingSearchMsg) existingSearchMsg.remove();
-                        if (visibleCount === 0) {
-                            let searchMsg = document.createElement('p');
-                            searchMsg.className = 'text-muted search-message';
-                            searchMsg.textContent = 'No matching history entries.';
-                            historyCard.appendChild(searchMsg);
-                        }
-                        if (window.ovpnMaps) {
-                            updateHistoryMap(filteredHistory);
-                        }
+                
+                // Filter the connection history based on the search term.
+                const filteredHistory = filterHistory(searchTerm);
+                updateConnectionHistory(filteredHistory);
+                
+                // Depending on whether the query looks like an IP or a name, update the history map:
+                const ipRegex = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+                if (window.ovpnMaps && window.ovpnMaps.mapHistory) {
+                    if (ipRegex.test(searchTerm)) {
+                    // IP query: just add markers for each matching history record.
+                    updateHistoryMap(filteredHistory);
+                    } else {
+                    // Name query: add markers and draw a polyline connecting them.
+                    updateHistoryMapForName(filteredHistory);
                     }
+                }
+                
+                // Also update the active map markers based on visible clients.
+                if (window.ovpnMaps && window.ovpnMaps.mapActive) {
+                    let visibleClients = [];
+                    for (const [profileName, clients] of Object.entries(profileData)) {
+                    clients.forEach(client => {
+                        if (
+                        client.common_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        client.real_address.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        (client.location && client.location.toLowerCase().includes(searchTerm.toLowerCase()))
+                        ) {
+                        visibleClients.push({ ...client, profile: profileName });
+                        }
+                    });
+                    }
+                    updateActiveMapFiltered(visibleClients);
                 }
             }
             
