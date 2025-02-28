@@ -22,6 +22,9 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.urandom(32)
 
+last_activity_time = {}  # {(profile_name, common_name): last_seen_timestamp}
+STALE_CONNECTION_TIMEOUT = 10
+
 # Add authentication
 auth = HTTPBasicAuth()
 USERNAME = os.getenv('FLASK_USERNAME')
@@ -313,36 +316,98 @@ def update_profile_status():
     Background thread function that periodically connects to each OpenVPN management interface,
     sends the "status" command, parses the output, and updates the client list and IP logs.
     """
-    global previous_clients_map
+    global previous_clients_map, last_activity_time
     
     # Create an application context for this thread
     with app.app_context():
         while True:
             data_changed = False
             current_clients_map = {}  # Track currently active clients with their data
+            current_time = time.time()
             
+            # First check for stale connections
+            for client_key, last_seen in list(last_activity_time.items()):
+                if current_time - last_seen > STALE_CONNECTION_TIMEOUT:
+                    profile_name, common_name = client_key
+                    
+                    # Only process if we still have the client in our records
+                    if client_key in previous_clients_map:
+                        client_data = previous_clients_map[client_key]
+                        logger.info(f"Client connection stale: {common_name} from {profile_name} (timeout)")
+                        
+                        # Add to connection history
+                        if add_to_connection_history(profile_name, client_data, "timeout"):
+                            data_changed = True
+                            
+                        # Remove from tracking structures
+                        del previous_clients_map[client_key]
+                        del last_activity_time[client_key]
+                        
+                        # Remove from profile_data immediately
+                        if profile_name in profile_data:
+                            profile_data[profile_name] = [c for c in profile_data[profile_name] 
+                                                      if c.get("common_name") != common_name]
+            
+            # Now process each VPN profile
             for profile in profiles_config:
                 try:
+                    # Create socket with timeout
                     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    s.connect(profile["socket_path"])
-                    # Send status command.
-                    s.sendall(b"status\n")
+                    s.settimeout(5)  # 5 second timeout for operations
+                    
+                    try:
+                        s.connect(profile["socket_path"])
+                    except socket.timeout:
+                        logger.error(f"Timeout connecting to socket for {profile['name']}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error connecting to socket for {profile['name']}: {e}")
+                        continue
+                    
+                    # Send status command
+                    try:
+                        s.sendall(b"status\n")
+                    except socket.timeout:
+                        logger.error(f"Timeout sending command to {profile['name']}")
+                        s.close()
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error sending command to {profile['name']}: {e}")
+                        s.close()
+                        continue
+                    
+                    # Read response with timeout protection
                     data = b""
-                    # Read until we see "END" in the output.
-                    while True:
-                        chunk = s.recv(4096)
-                        if not chunk:
-                            break
-                        data += chunk
-                        if b"END" in data:
-                            break
-                    s.close()
+                    try:
+                        start_time = time.time()
+                        while time.time() - start_time < 5:  # 5 second max read time
+                            try:
+                                chunk = s.recv(4096)
+                                if not chunk:
+                                    break
+                                data += chunk
+                                if b"END" in data:
+                                    break
+                            except socket.timeout:
+                                logger.warning(f"Socket read timed out for {profile['name']}")
+                                break
+                            except Exception as e:
+                                logger.error(f"Error reading from socket for {profile['name']}: {e}")
+                                break
+                    finally:
+                        s.close()
+                    
+                    if not data:
+                        logger.error(f"No data received from {profile['name']}")
+                        continue
+                        
                     status_output = data.decode()
                     
-                    # Parse status output.
+                    # Parse status output
                     lines = status_output.splitlines()
                     clients = []
-                    # Find section boundaries.
+                    
+                    # Find section boundaries
                     start_index = None
                     end_index = None
                     for i, line in enumerate(lines):
@@ -352,10 +417,8 @@ def update_profile_status():
                             end_index = i
                             break
                     
-                    # Parse client data if the section was found.
+                    # Parse client data if section was found
                     if start_index is not None and end_index is not None:
-                        # We assume the header line is at start_index+2.
-                        # The client data lines follow until the ROUTING TABLE line.
                         for line in lines[start_index+3:end_index]:
                             if not line.strip():
                                 continue
@@ -367,7 +430,7 @@ def update_profile_status():
                                 connected_since_str = parts[4].strip()
                                 
                                 try:
-                                    # Parse the timestamp assuming it's in the container's timezone (Asia/Ho_Chi_Minh)
+                                    # Parse the timestamp assuming it's in the container's timezone
                                     tz = pytz.timezone('Asia/Ho_Chi_Minh')
                                     conn_time = datetime.datetime.strptime(connected_since_str, "%Y-%m-%d %H:%M:%S")
                                     conn_time = tz.localize(conn_time)  # Make timezone-aware
@@ -401,7 +464,7 @@ def update_profile_status():
                                     "real_address": ip,  # Store only IP address, not port
                                     "real_address_full": real_address,  # Keep full address in a separate field
                                     "connected_since": connected_since_str,
-                                    "connected_timestamp": connected_timestamp,  # Add timestamp for client-side calcs
+                                    "connected_timestamp": connected_timestamp,
                                     "runtime": runtime,
                                     "location": location_str,
                                     "lat": location_dict.get("lat"),
@@ -413,6 +476,9 @@ def update_profile_status():
                                 # Store in current clients map
                                 client_key = (profile["name"], common_name)
                                 current_clients_map[client_key] = client_data
+                                
+                                # Update last activity time
+                                last_activity_time[client_key] = current_time
                                 
                                 # Update the IP log
                                 if common_name not in profile_ip_log:
@@ -430,10 +496,7 @@ def update_profile_status():
                     profile_data[profile["name"]] = clients
                 except Exception as e:
                     logger.error(f"Error updating profile {profile['name']}: {e}")
-                    # If unable to connect or parse, clear the client list for this profile.
-                    if profile["name"] in profile_data and profile_data[profile["name"]]:
-                        profile_data[profile["name"]] = []
-                        data_changed = True
+                    # Don't clear client list on temporary errors - let stale detection handle it
             
             # Check for disconnected clients
             for client_key, client_data in list(previous_clients_map.items()):
@@ -444,10 +507,15 @@ def update_profile_status():
                     # Add to connection history
                     if add_to_connection_history(profile_name, client_data, "client-side"):
                         data_changed = True
+                    
+                    # Remove from tracking
+                    if client_key in last_activity_time:
+                        del last_activity_time[client_key]
                         
                     # Make sure it's immediately removed from profile_data too
                     if profile_name in profile_data:
-                        profile_data[profile_name] = [c for c in profile_data[profile_name] if c.get("common_name") != common_name]
+                        profile_data[profile_name] = [c for c in profile_data[profile_name] 
+                                                  if c.get("common_name") != common_name]
             
             # Update previous clients map for next iteration
             previous_clients_map = current_clients_map.copy()
@@ -456,8 +524,8 @@ def update_profile_status():
             if data_changed:
                 update_data = {
                     'profile_data': profile_data,
-                    'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},  # Convert sets to lists for JSON
-                    'connection_history': list(connection_history)  # Convert deque to list for JSON
+                    'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
+                    'connection_history': list(connection_history)
                 }
                 
                 # Convert to JSON once
@@ -538,7 +606,7 @@ def kill_client(profile_name, client_name):
     """
     Connect to the management interface for the given profile and send the kill command for the specified client.
     """
-    # Find the profile configuration.
+    # Find the profile configuration
     profile = next((p for p in profiles_config if p["name"] == profile_name), None)
     if not profile:
         flash("Profile not found", "error")
@@ -553,32 +621,70 @@ def kill_client(profile_name, client_name):
                 break
     
     try:
+        # Create socket with timeout
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(profile["socket_path"])
+        s.settimeout(5)  # 5 second timeout
         
-        # First, read the welcome banner
-        banner = s.recv(4096).decode()
+        try:
+            s.connect(profile["socket_path"])
+        except socket.timeout:
+            flash("Timeout connecting to management socket", "error")
+            return redirect(url_for("index"))
+        except Exception as e:
+            flash(f"Error connecting to management socket: {e}", "error")
+            return redirect(url_for("index"))
+        
+        # Read welcome banner with timeout
+        try:
+            banner = s.recv(4096).decode()
+        except socket.timeout:
+            flash("Timeout reading from management socket", "error")
+            s.close()
+            return redirect(url_for("index"))
+        except Exception as e:
+            flash(f"Error reading from management socket: {e}", "error")
+            s.close()
+            return redirect(url_for("index"))
         
         # Send kill command
         cmd = f"kill {client_name}\n"
-        s.sendall(cmd.encode())
+        try:
+            s.sendall(cmd.encode())
+        except socket.timeout:
+            flash("Timeout sending kill command", "error")
+            s.close()
+            return redirect(url_for("index"))
+        except Exception as e:
+            flash(f"Error sending kill command: {e}", "error")
+            s.close()
+            return redirect(url_for("index"))
         
-        # Read the complete response
+        # Read response with timeout protection
         data = b""
-        while True:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-            # Kill command typically returns a SUCCESS or ERROR message
-            if b"SUCCESS" in data or b"ERROR" in data:
-                break
-            # Add timeout safety
-            if len(data) > 8192:  # Limit response size
-                break
-                
-        response = data.decode().strip()
-        s.close()
+        try:
+            start_time = time.time()
+            while time.time() - start_time < 5:  # 5 second max read time
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b"SUCCESS" in data or b"ERROR" in data:
+                        break
+                except socket.timeout:
+                    flash("Timeout reading kill response", "warning")
+                    break
+                except Exception as e:
+                    flash(f"Error reading kill response: {e}", "error")
+                    break
+                    
+                # Safety limit on response size
+                if len(data) > 8192:
+                    break
+        finally:
+            s.close()
+            
+        response = data.decode().strip() if data else "No response"
         
         if "SUCCESS" in response:
             flash(f"Successfully killed connection for {client_name}", "success")
@@ -593,10 +699,13 @@ def kill_client(profile_name, client_name):
                     profile_data[profile_name] = [c for c in profile_data[profile_name] 
                                                if c.get("common_name") != client_name]
                 
-                # Also remove this client from the previous_clients_map to prevent duplicate entries
+                # Also remove from all tracking structures
                 client_key = (profile_name, client_name)
                 if client_key in previous_clients_map:
                     del previous_clients_map[client_key]
+                
+                if client_key in last_activity_time:
+                    del last_activity_time[client_key]
                     
                 # Force an SSE update immediately
                 update_data = {
@@ -620,7 +729,8 @@ def kill_client(profile_name, client_name):
         else:
             flash(f"Kill command response: {response}", "info")
     except Exception as e:
-        flash(f"Error sending kill command: {e}", "error")
+        flash(f"Error in kill operation: {e}", "error")
+    
     return redirect(url_for("index"))
 
 # Start the background thread.
