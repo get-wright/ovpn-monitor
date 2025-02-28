@@ -90,13 +90,30 @@ class ConnectionHistory(db.Model):
     lon = db.Column(db.Float)  # New field for longitude
 
     def to_dict(self):
+        # Convert UTC times to local time for display
+        try:
+            # Add timezone info to the datetime objects (as UTC)
+            connected_since_utc = pytz.UTC.localize(self.connected_since)
+            disconnected_at_utc = pytz.UTC.localize(self.disconnected_at)
+            
+            # Convert to Asia/Ho_Chi_Minh timezone
+            connected_since_local = connected_since_utc.astimezone(pytz.timezone('Asia/Ho_Chi_Minh'))
+            disconnected_at_local = disconnected_at_utc.astimezone(pytz.timezone('Asia/Ho_Chi_Minh'))
+            
+            connected_str = connected_since_local.strftime("%Y-%m-%d %H:%M:%S")
+            disconnected_str = disconnected_at_local.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as e:
+            # Fallback if timezone conversion fails
+            connected_str = self.connected_since.strftime("%Y-%m-%d %H:%M:%S")
+            disconnected_str = self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S")
+            
         result = {
             "profile": self.profile,
             "common_name": self.common_name,
             "real_address": self.real_address,
             "location": self.location,
-            "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
-            "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "connected_since": connected_str,
+            "disconnected_at": disconnected_str,
             "runtime": self.runtime,
             "lat": self.lat,
             "lon": self.lon
@@ -107,7 +124,6 @@ class ConnectionHistory(db.Model):
             result["disconnect_type"] = self.disconnect_type
         else:
             result["disconnect_type"] = "client-side"  # default for old records
-            
         return result
 
 # Connection history (limited to the most recent 100 entries)
