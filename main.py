@@ -12,24 +12,20 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc, inspect, text
 import os
 import pytz
-from maxminddb import open_database
-from flask_httpauth import HTTPBasicAuth
-from dotenv import load_dotenv
+from maxminddb import open_database  # Add this import
+from flask_httpauth import HTTPBasicAuth  # Add this import
+from dotenv import load_dotenv  # Add this import
 
 # Load environment variables
 load_dotenv()
 
-# Add this constant for timezone handling
-TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Vietnam timezone (UTC+7)
-
 app = Flask(__name__)
 app.secret_key = os.urandom(32)
 
-# Add HTTP Basic Auth
+# Add authentication
 auth = HTTPBasicAuth()
 USERNAME = os.getenv('FLASK_USERNAME')
 PASSWORD = os.getenv('FLASK_PASSWORD')
-
 @auth.verify_password
 def verify_password(username, password):
     if username == USERNAME and password == PASSWORD:
@@ -55,10 +51,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger('ovpn-monitor')
 
+# Configure GeoIP database (global variable will be set in start_background_thread)
+reader = None
+
 # Configuration: list of OpenVPN management interface profiles.
 # Each profile must include a unique name and its corresponding UNIX socket path.
 profiles_config = [
-    {"name": "Active BKCTF Profiles", "socket_path": "/run/openvpn/pt.sock"},
+    {"name": "profile1", "socket_path": "/run/openvpn/pt.sock"},
     # You can add more profiles here, for example:
     # {"name": "profile2", "socket_path": "/run/openvpn/profile2.sock"},
 ]
@@ -73,7 +72,7 @@ profile_ip_log = {}   # { common_name: set([ip1, ip2, ...]) }
 def to_utc7_filter(dt_str):
     dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     dt_utc = pytz.UTC.localize(dt)
-    dt_utc7 = dt_utc.astimezone(TIMEZONE)
+    dt_utc7 = dt_utc.astimezone(pytz.timezone('Asia/Ho_Chi_Minh'))
     return dt_utc7.strftime("%Y-%m-%d %H:%M:%S")
 
 class ConnectionHistory(db.Model):
@@ -86,22 +85,18 @@ class ConnectionHistory(db.Model):
     disconnected_at = db.Column(db.DateTime, nullable=False)
     runtime = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    disconnect_type = db.Column(db.String(50), default="client-side")
+    disconnect_type = db.Column(db.String(50), default="client-side")  # Added to track disconnect type
     lat = db.Column(db.Float)  # New field for latitude
     lon = db.Column(db.Float)  # New field for longitude
 
     def to_dict(self):
-        # Convert UTC times to the target timezone
-        connected_since_local = self.connected_since.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
-        disconnected_at_local = self.disconnected_at.replace(tzinfo=pytz.UTC).astimezone(TIMEZONE)
-        
         result = {
             "profile": self.profile,
             "common_name": self.common_name,
             "real_address": self.real_address,
             "location": self.location,
-            "connected_since": connected_since_local.strftime("%Y-%m-%d %H:%M:%S"),
-            "disconnected_at": disconnected_at_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "connected_since": self.connected_since.strftime("%Y-%m-%d %H:%M:%S"),
+            "disconnected_at": self.disconnected_at.strftime("%Y-%m-%d %H:%M:%S"),
             "runtime": self.runtime,
             "lat": self.lat,
             "lon": self.lon
@@ -127,13 +122,13 @@ def check_and_migrate_database():
         # Create all tables if they don't exist
         db.create_all()
         
-        # Check if the disconnect_type column exists in ConnectionHistory table
+        # Check if columns exist in ConnectionHistory table
         inspector = inspect(db.engine)
         columns = [col['name'] for col in inspector.get_columns('connection_history')]
         
+        # Check for disconnect_type column
         if 'disconnect_type' not in columns:
             logger.info("Adding disconnect_type column to connection_history table")
-            # Use raw SQL to add the column since SQLAlchemy doesn't handle schema migrations
             try:
                 db.session.execute(text('ALTER TABLE connection_history ADD COLUMN disconnect_type VARCHAR(50) DEFAULT "client-side"'))
                 db.session.commit()
@@ -142,7 +137,7 @@ def check_and_migrate_database():
                 logger.error(f"Error adding disconnect_type column: {e}")
                 db.session.rollback()
         
-        # Check for lat/lon columns and add them if missing
+        # Check for lat and lon columns
         if 'lat' not in columns:
             logger.info("Adding lat column to connection_history table")
             try:
@@ -188,12 +183,9 @@ ip_location_cache = {}  # {ip: {country: ..., city: ...}}
 # Store a copy of previous clients for tracking disconnections 
 previous_clients_map = {}  # {(profile_name, common_name): client_data}
 
-# MaxMind GeoLite2 reader
-reader = None
-
 def get_ip_location(ip):
     """
-    Get location information for an IP address using MaxMind GeoLite2 database.
+    Get location information for an IP address using the MaxMind GeoIP database.
     Caches results to avoid repeated lookups for the same IP.
     """
     # Return cached result if available
@@ -209,41 +201,22 @@ def get_ip_location(ip):
         if response:
             city = response.get('city', {}).get('names', {}).get('en', 'Unknown')
             country = response.get('country', {}).get('names', {}).get('en', 'Unknown')
-            region = response.get('subdivisions', [{}])[0].get('names', {}).get('en', '')
+            region = response.get('subdivisions', [{}])[0].get('names', {}).get('en', '') if response.get('subdivisions') else ''
             lat = response.get('location', {}).get('latitude', None)
             lon = response.get('location', {}).get('longitude', None)
             location = {
                 "country": country,
                 "city": city,
                 "region": region,
-                "lat": lat, 
+                "lat": lat,
                 "lon": lon
             }
             ip_location_cache[ip] = location
             return location
     except Exception as e:
         logger.error(f"Error getting location for IP {ip}: {e}")
-        
-        # Fallback to using ip-api.com
-        try:
-            response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "success":
-                    location = {
-                        "country": data.get("country", "Unknown"),
-                        "city": data.get("city", "Unknown"),
-                        "region": data.get("regionName", ""),
-                        "lat": data.get("lat", None),
-                        "lon": data.get("lon", None)
-                    }
-                    # Cache the result
-                    ip_location_cache[ip] = location
-                    return location
-        except Exception as fallback_e:
-            logger.error(f"Fallback IP lookup failed for {ip}: {fallback_e}")
     
-    # Return default if lookup fails
+    # Return default if database lookup fails
     default = {"country": "Unknown", "city": "Unknown", "region": "", "lat": None, "lon": None}
     ip_location_cache[ip] = default
     return default
@@ -254,57 +227,51 @@ def add_to_connection_history(profile_name, client_data, disconnect_type="client
     Returns True if successful, False otherwise
     """
     try:
-        # Get current time in the target timezone
-        disconnected_at = datetime.datetime.now(TIMEZONE)
-        
-        # Parse the connected_since string into a naive datetime
-        connected_since_naive = datetime.datetime.strptime(
+        disconnected_at = datetime.datetime.now()
+        # Parse the connected_since string into a datetime object
+        connected_since = datetime.datetime.strptime(
             client_data["connected_since"], 
             "%Y-%m-%d %H:%M:%S"
         )
         
-        # Localize to the target timezone
-        connected_since = TIMEZONE.localize(connected_since_naive)
-        
-        # Calculate runtime directly using timedeltas
-        runtime_delta = disconnected_at - connected_since
-        runtime = str(runtime_delta).split('.')[0]  # Remove microseconds
-        
-        # Get location data
+        # Get location data including lat/lon
         location_dict = get_ip_location(client_data["real_address"])
         location_str = f"{location_dict['city']}, {location_dict['country']}"
         lat = location_dict.get("lat")
         lon = location_dict.get("lon")
         
+        # Create a new session for this specific operation
         with app.app_context():
-            # Store times in UTC in the database
+            # Create the record within the context
             history_record = ConnectionHistory(
                 profile=profile_name,
                 common_name=client_data["common_name"],
                 real_address=client_data["real_address"],
                 location=location_str,
-                connected_since=connected_since.astimezone(pytz.UTC),  # Convert to UTC for storage
-                disconnected_at=disconnected_at.astimezone(pytz.UTC),  # Convert to UTC for storage
-                runtime=runtime,
+                connected_since=connected_since,
+                disconnected_at=disconnected_at,
+                runtime=client_data["runtime"],
                 disconnect_type=disconnect_type,
                 lat=lat,
                 lon=lon
             )
             
+            # Add to session and commit within the context
             db.session.add(history_record)
             db.session.commit()
             
-            # Use the record's to_dict method for consistent formatting
+            # Create the dict representation while still in context
             history_entry = history_record.to_dict()
             
-            # Only modify the real_address for display if needed
+            # Simplify real address if it includes port
             if ':' in history_entry["real_address"]:
                 history_entry["real_address"] = history_entry["real_address"].split(':')[0]
-                
-            connection_history.appendleft(history_entry)
-            
-            logger.info(f"Added to history DB: {client_data['common_name']} ({disconnect_type})")
-            return True
+        
+        # Now outside the context, we can safely use the dict representation
+        connection_history.appendleft(history_entry)
+        
+        logger.info(f"Added to history DB: {client_data['common_name']} ({disconnect_type})")
+        return True
     except Exception as e:
         logger.error(f"Error adding connection to history DB: {e}")
         try:
@@ -328,61 +295,44 @@ def update_profile_status():
             data_changed = False
             current_clients_map = {}  # Track currently active clients with their data
             
-            logger.info(f"Updating profiles ({len(profiles_config)} profiles defined)")
-            
             for profile in profiles_config:
                 try:
-                    logger.debug(f"Connecting to profile {profile['name']} via {profile['socket_path']}")
-                    # Connect to the OpenVPN management socket
                     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    s.settimeout(2)  # Set timeout to avoid hanging
                     s.connect(profile["socket_path"])
-                    
-                    # Read welcome message
-                    s.recv(4096)
-                    
-                    # Send status command
+                    # Send status command.
                     s.sendall(b"status\n")
-                    
-                    # Read full response
                     data = b""
+                    # Read until we see "END" in the output.
                     while True:
-                        try:
-                            chunk = s.recv(4096)
-                            if not chunk:
-                                break
-                            data += chunk
-                            if b"END" in data:
-                                break
-                        except socket.timeout:
+                        chunk = s.recv(4096)
+                        if not chunk:
                             break
-                    
+                        data += chunk
+                        if b"END" in data:
+                            break
                     s.close()
+                    status_output = data.decode()
                     
-                    # Process the response to extract client data
-                    response = data.decode('utf-8', errors='ignore')
-                    lines = response.splitlines()
-                    
-                    # Find the client list section
+                    # Parse status output.
+                    lines = status_output.splitlines()
+                    clients = []
+                    # Find section boundaries.
                     start_index = None
                     end_index = None
                     for i, line in enumerate(lines):
-                        if line.startswith("Common Name,Real Address") or line.startswith("OpenVPN CLIENT LIST"):
+                        if line.startswith("OpenVPN CLIENT LIST"):
                             start_index = i
-                        elif start_index is not None and line.startswith("ROUTING TABLE"):
+                        if line.startswith("ROUTING TABLE"):
                             end_index = i
                             break
                     
-                    # Parse client data if the section was found
-                    clients = []
-                    
+                    # Parse client data if the section was found.
                     if start_index is not None and end_index is not None:
-                        client_start = start_index + (3 if lines[start_index].startswith("OpenVPN CLIENT LIST") else 1)
-                        
-                        for line in lines[client_start:end_index]:
+                        # We assume the header line is at start_index+2.
+                        # The client data lines follow until the ROUTING TABLE line.
+                        for line in lines[start_index+3:end_index]:
                             if not line.strip():
                                 continue
-                                
                             parts = line.split(',')
                             if len(parts) >= 5:
                                 common_name = parts[0].strip()
@@ -391,23 +341,14 @@ def update_profile_status():
                                 connected_since = parts[4].strip()
                                 
                                 try:
-                                    # Parse the time string from OpenVPN
-                                    conn_time_naive = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
-                                    
-                                    # Localize to timezone
-                                    conn_time = TIMEZONE.localize(conn_time_naive)
-                                    
-                                    # Get current time in the same timezone
-                                    now = datetime.datetime.now(TIMEZONE)
-                                    
-                                    # Calculate runtime as a timedelta
-                                    delta = now - conn_time
-                                    
-                                    # Format without microseconds
-                                    runtime = str(delta).split('.')[0]
+                                    conn_time = datetime.datetime.strptime(connected_since, "%Y-%m-%d %H:%M:%S")
+                                    runtime = str(datetime.datetime.now() - conn_time).split('.')[0]
                                 except Exception as ex:
                                     logger.error(f"Error parsing connection time: {ex}")
                                     runtime = "N/A"
+                                    
+                                # Extract the IP part (before the colon)
+                                ip = real_address.split(':')[0]
                                 
                                 # Get location information for the IP
                                 location_dict = get_ip_location(ip)
@@ -418,7 +359,6 @@ def update_profile_status():
                                     "real_address": ip,  # Store only IP address, not port
                                     "real_address_full": real_address,  # Keep full address in a separate field
                                     "connected_since": connected_since,
-                                    "connected_timestamp": int(conn_time.timestamp()),
                                     "runtime": runtime,
                                     "location": location_str,
                                     "lat": location_dict.get("lat"),
@@ -465,7 +405,7 @@ def update_profile_status():
             # Update previous clients map for next iteration
             previous_clients_map = current_clients_map.copy()
             
-            # If data has changed, emit update to clients
+            # If data has changed, emit update to clients via SSE
             if data_changed:
                 update_data = {
                     'profile_data': profile_data,
@@ -485,11 +425,8 @@ def update_profile_status():
                             queue.append(json_data)
                         except Exception as e:
                             logger.error(f"Error pushing to client {client_id}: {e}")
-                
-                # Also emit via SocketIO for backward compatibility
-                socketio.emit('data_update', update_data)
             
-            time.sleep(1)  # Update every 1 second
+            time.sleep(1)  # Update every 1 second.
 
 @app.route('/')
 @auth.login_required
@@ -505,11 +442,17 @@ def index():
 @auth.login_required
 def sse_stream():
     """
-    Server-Sent Events (SSE) endpoint for live updates
+    Route handler for Server-Sent Events (SSE)
+    Pushes real-time updates to connected clients
     """
     def event_stream():
         # Initial data push
-        yield f"data: {json.dumps({'profile_data': profile_data, 'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()}, 'connection_history': list(connection_history)})}\n\n"
+        initial_data = {
+            'profile_data': profile_data, 
+            'profile_ip_log': {k: list(v) for k, v in profile_ip_log.items()},
+            'connection_history': list(connection_history)
+        }
+        yield f"data: {json.dumps(initial_data)}\n\n"
         
         # Create a new data queue for this client
         client_queue = deque(maxlen=10)
@@ -606,43 +549,19 @@ def kill_client(profile_name, client_name):
         flash(f"Error sending kill command: {e}", "error")
     return redirect(url_for("index"))
 
-@app.route('/debug')
-@auth.login_required
-def debug_info():
-    """
-    Debug endpoint that provides useful system information
-    """
-    # Create a debug information dictionary
-    debug_info = {
-        'timezone': str(TIMEZONE),
-        'server_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'timezone_time': datetime.datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S'),
-        'profiles_config': profiles_config,
-        'active_profiles': list(profile_data.keys()),
-        'active_clients_count': sum(len(clients) for clients in profile_data.values()),
-        'connection_history_count': len(connection_history),
-        'database_path': db_path,
-        'geolocation_db': "Loaded" if reader is not None else "Not loaded"
-    }
-    
-    # Return as JSON
-    return json.dumps(debug_info, indent=4)
-
 # Start the background thread.
 def start_background_thread():
-    """
-    Initialize the MaxMind GeoIP database and start the background thread
-    """
+    """Initialize the GeoIP database and start the background update thread"""
     global reader
+    # Initialize MaxMind GeoIP database
     maxmind_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'GeoLite2-City.mmdb')
     try:
         reader = open_database(maxmind_db_path)
         logger.info(f"Successfully opened MaxMind database at: {maxmind_db_path}")
     except Exception as e:
         logger.error(f"Error opening MaxMind database: {e}")
-        logger.info("Will fall back to ip-api.com for geolocation")
         reader = None
-    
+        
     threading.Thread(target=update_profile_status, daemon=True).start()
 
 if __name__ == '__main__':
@@ -652,4 +571,4 @@ if __name__ == '__main__':
         # Load history after making sure the schema is correct
         load_connection_history()
     start_background_thread()
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
